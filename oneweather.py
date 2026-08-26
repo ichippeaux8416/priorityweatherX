@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 # =============================================================================
 
 BOT_NAME = os.getenv("BOT_NAME", "PriorityWeather").strip() or "PriorityWeather"
-BUILD_ID = "2026-08-26-media-json-v6"
+BUILD_ID = "2026-08-26-spc-gis-images-v7"
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "").strip()
 
 X_CLIENT_ID = os.getenv("X_CLIENT_ID", "").strip()
@@ -2769,13 +2769,34 @@ def fetch_product_page(
     BeautifulSoup,
 ]:
 
+    headers = {
+        "Accept":
+            "text/html,"
+            "application/xhtml+xml"
+    }
+
+    if "spc.noaa.gov" in url.lower():
+
+        headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(X11; Linux x86_64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/127.0.0.0 "
+                    "Safari/537.36"
+                ),
+                "Referer": "https://www.spc.noaa.gov/",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            }
+        )
+
     response = http_get(
         url,
-        headers={
-            "Accept":
-                "text/html,"
-                "application/xhtml+xml"
-        },
+        headers=headers,
         timeout=(
             8,
             35,
@@ -2811,6 +2832,7 @@ def fetch_product_page(
 
 
 def page_product_image(
+
     page_url: str,
     soup: BeautifulSoup,
     kind: str,
@@ -4211,9 +4233,22 @@ def process_rss_source(
 
         try:
 
-            post = renderer(
-                item
-            )
+            try:
+
+                post = renderer(
+                    item
+                )
+
+            except RetryableSourceDataError as exc:
+
+                log.info(
+                    "Deferred %s %s: %s",
+                    source,
+                    item.key[:16],
+                    exc,
+                )
+
+                continue
 
             if not post:
 
@@ -4245,21 +4280,195 @@ def process_rss_source(
 # =============================================================================
 
 
+class RetryableSourceDataError(
+    RuntimeError
+):
+    pass
+
+
+SPC_OUTLOOK_MAPSERVER = (
+    "https://mapservices.weather.noaa.gov/"
+    "vector/rest/services/"
+    "outlooks/SPC_wx_outlks/"
+    "MapServer"
+)
+
+SPC_MCD_MAPSERVER = (
+    "https://mapservices.weather.noaa.gov/"
+    "vector/rest/services/"
+    "outlooks/spc_mesoscale_discussion/"
+    "MapServer"
+)
+
+WWA_MAPSERVER = (
+    "https://mapservices.weather.noaa.gov/"
+    "eventdriven/rest/services/"
+    "WWA/watch_warn_adv/"
+    "MapServer"
+)
+
+SPC_OUTLOOK_LAYER_IDS = {
+    1: {
+        "categorical": 1,
+        "tornado": 3,
+        "hail": 5,
+        "wind": 7,
+    },
+    2: {
+        "categorical": 9,
+        "tornado": 11,
+        "hail": 13,
+        "wind": 15,
+    },
+    3: {
+        "categorical": 17,
+        "severe": 19,
+    },
+    4: {"probability": 21},
+    5: {"probability": 22},
+    6: {"probability": 23},
+    7: {"probability": 24},
+    8: {"probability": 25},
+}
+
+
+@dataclass(
+    frozen=True
+)
+class SPCConvectiveSnapshot:
+
+    day: int
+    category: str
+    tornado_risk: str
+    wind_risk: str
+    hail_risk: str
+    severe_risk: str
+    image_path: str
+    issued: str
+    valid: str
+
+
+@dataclass(
+    frozen=True
+)
+class SPCGeometryMatch:
+
+    attributes: dict[
+        str,
+        Any,
+    ]
+    geometry: dict[
+        str,
+        Any,
+    ]
+
+
+def arcgis_query_features(
+    mapserver: str,
+    layer: int,
+    *,
+    where: str = "1=1",
+    out_fields: str = "*",
+    return_geometry: bool = False,
+    order_by: str = "",
+    out_sr: Optional[int] = None,
+) -> list[
+    dict[
+        str,
+        Any,
+    ]
+]:
+
+    params: dict[
+        str,
+        Any,
+    ] = {
+        "where": where,
+        "outFields": out_fields,
+        "returnGeometry": (
+            "true"
+            if return_geometry
+            else
+            "false"
+        ),
+        "f": "json",
+    }
+
+    if order_by:
+        params["orderByFields"] = order_by
+
+    if out_sr is not None:
+        params["outSR"] = str(out_sr)
+
+    features: list[dict[str, Any]] = []
+    offset = 0
+
+    while True:
+        page_params = dict(params)
+        page_params["resultOffset"] = offset
+        page_params["resultRecordCount"] = 2000
+
+        response = http_get(
+            f"{mapserver}/{layer}/query",
+            params=page_params,
+            headers={"Accept": "application/json"},
+            timeout=(8, 40),
+        )
+
+        payload = response.json()
+
+        if payload.get("error"):
+            raise RuntimeError(
+                "ArcGIS query error "
+                f"for {mapserver}/{layer}: "
+                f"{payload['error']!r}"
+            )
+
+        page = payload.get("features") or []
+        features.extend(page)
+
+        if not payload.get("exceededTransferLimit") or not page:
+            break
+
+        offset += len(page)
+
+    return features
+
+
+def sql_quote(
+    value: str,
+) -> str:
+
+    return "'" + value.replace("'", "''") + "'"
+
+
+def digits_only(
+    value: Any,
+) -> str:
+
+    return re.sub(r"\D+", "", str(value or ""))
+
+
+def clean_spc_location(
+    value: str,
+) -> str:
+
+    cleaned = squish(value)
+    cleaned = re.sub(r"^(?:portions|parts) of\s+", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"^(?:the )", "", cleaned, flags=re.I)
+    return truncate(cleaned, 110)
+
+
 def spc_item_is_real(
     item: RSSItem,
     kind: str,
 ) -> bool:
 
-    combined = (
-        f"{item.title} "
-        f"{item.text}"
-    ).lower()
+    combined = f"{item.title} {item.text}".lower()
 
     if any(
-        marker
-        in combined
-        for marker
-        in (
+        marker in combined
+        for marker in (
             "no mesoscale discussions",
             "no watches are",
             "no watches in effect",
@@ -4268,50 +4477,26 @@ def spc_item_is_real(
             "no fire weather",
         )
     ):
-
         return False
 
     if kind == "watch":
-
         return (
-            "status report"
-            not in combined
-            and
-            "watch"
-            in combined
-            and
-            (
-                "tornado"
-                in combined
-                or
-                "severe thunderstorm"
-                in combined
+            "status report" not in combined
+            and "watch" in combined
+            and (
+                "tornado" in combined
+                or "severe thunderstorm" in combined
             )
         )
 
     if kind == "md":
-
-        return (
-            "mesoscale discussion"
-            in combined
-        )
+        return "mesoscale discussion" in combined
 
     if kind == "convective":
-
-        return (
-            "outlook"
-            in combined
-        )
+        return "outlook" in combined
 
     if kind == "fire":
-
-        return (
-            "fire"
-            in combined
-            and
-            "outlook"
-            in combined
-        )
+        return "fire" in combined and "outlook" in combined
 
     return True
 
@@ -4322,147 +4507,49 @@ def spc_field(
 ) -> str:
 
     match = re.search(
-        rf"(?is)"
-        rf"{re.escape(label)}"
-        rf"\s*\.{{3}}\s*"
-        rf"(.*?)"
-        rf"(?="
-        rf"\n\s*"
-        rf"(?:"
-        rf"Areas affected|"
-        rf"Concerning|"
-        rf"Valid|"
-        rf"Probability of Watch Issuance|"
-        rf"Summary|"
-        rf"Discussion"
-        rf")"
-        rf"\s*\.{{3}}"
-        rf"|$"
-        rf")",
+        rf"(?is){re.escape(label)}\s*\.{{3}}\s*(.*?)"
+        rf"(?=\n\s*(?:Areas affected|Concerning|Valid|Probability of Watch Issuance|Summary|Discussion)\s*\.{{3}}|$)",
         text,
     )
 
-    return (
-        squish(
-            match.group(1)
-        )
-        if match
-        else
-        ""
-    )
+    return squish(match.group(1)) if match else ""
 
 
 def spc_product_name(
     item: RSSItem,
     kind: str,
-) -> tuple[
-    str,
-    str,
-]:
+) -> tuple[str, str]:
 
-    combined = (
-        f"{item.title} "
-        f"{item.text}"
-    )
+    combined = f"{item.title} {item.text}"
 
     if kind == "watch":
-
         match = re.search(
-            r"\b"
-            r"(Tornado Watch|"
-            r"Severe Thunderstorm Watch)"
-            r"\s*#?\s*"
-            r"(\d+)\b",
+            r"\b(Tornado Watch|Severe Thunderstorm Watch)\s*#?\s*(\d+)\b",
             combined,
             re.I,
         )
-
         if match:
-
-            return (
-                f"{match.group(1).title()} "
-                f"{int(match.group(2))}",
-                match.group(2),
-            )
-
+            return (f"{match.group(1).title()} {int(match.group(2))}", match.group(2))
         return (
-            (
-                "Tornado Watch"
-                if
-                "tornado"
-                in
-                combined.lower()
-                else
-                "Severe Thunderstorm Watch"
-            ),
+            "Tornado Watch" if "tornado" in combined.lower() else "Severe Thunderstorm Watch",
             "",
         )
 
     if kind == "md":
-
-        match = re.search(
-            r"Mesoscale Discussion"
-            r"\s*#?\s*"
-            r"(\d+)",
-            combined,
-            re.I,
-        )
-
+        match = re.search(r"Mesoscale Discussion\s*#?\s*(\d+)", combined, re.I)
         if match:
-
-            return (
-                f"Mesoscale Discussion "
-                f"{int(match.group(1))}",
-                match.group(1),
-            )
-
-        return (
-            "Mesoscale Discussion",
-            "",
-        )
+            return (f"Mesoscale Discussion {int(match.group(1))}", match.group(1))
+        return ("Mesoscale Discussion", "")
 
     if kind == "convective":
-
-        match = re.search(
-            r"Day\s*([1-8])",
-            combined,
-            re.I,
-        )
-
-        return (
-            (
-                f"Day {match.group(1)} "
-                f"Convective Outlook"
-                if match
-                else
-                "Convective Outlook"
-            ),
-            "",
-        )
+        match = re.search(r"Day\s*([1-8])", combined, re.I)
+        return (f"Day {match.group(1)} Convective Outlook" if match else "Convective Outlook", "")
 
     if kind == "fire":
+        match = re.search(r"Day\s*([1-8])", combined, re.I)
+        return (f"Day {match.group(1)} Fire Weather Outlook" if match else "Fire Weather Outlook", "")
 
-        match = re.search(
-            r"Day\s*([1-8])",
-            combined,
-            re.I,
-        )
-
-        return (
-            (
-                f"Day {match.group(1)} "
-                f"Fire Weather Outlook"
-                if match
-                else
-                "Fire Weather Outlook"
-            ),
-            "",
-        )
-
-    return (
-        item.title,
-        "",
-    )
+    return (item.title, "")
 
 
 def spc_location(
@@ -4470,87 +4557,33 @@ def spc_location(
     kind: str,
 ) -> str:
 
-    area = spc_field(
-        text,
-        "Areas affected",
-    )
-
+    area = spc_field(text, "Areas affected")
     if area:
-
-        return truncate(
-            area,
-            110,
-        )
+        return clean_spc_location(area)
 
     if kind == "watch":
-
         match = re.search(
-            r"(?is)"
-            r"watch\s+for\s+"
-            r"portions\s+of\s+"
-            r"(.*?)"
-            r"(?="
-            r"\s+effective\b|"
-            r"\s+primary threats\b|"
-            r"\n\s*\*"
-            r")",
+            r"(?is)watch\s+for\s+portions\s+of\s+(.*?)(?=\s+effective\b|\s+primary threats\b|\n\s*\*)",
             text,
         )
-
         if match:
-
-            return truncate(
-                squish(
-                    match.group(1)
-                ),
-                110,
-            )
+            return clean_spc_location(match.group(1))
 
     if kind == "convective":
-
         match = re.search(
-            r"(?is)"
-            r"THERE IS "
-            r"(?:AN?|A) "
-            r".*? "
-            r"RISK OF "
-            r"SEVERE THUNDERSTORMS "
-            r"(?:ACROSS|FOR) "
-            r"(.*?)"
-            r"(?:\.|\n)",
+            r"(?is)THERE IS (?:AN?|A) .*? RISK OF SEVERE THUNDERSTORMS (?:ACROSS|FOR) (.*?)(?:\.|\n)",
             text,
         )
-
         if match:
-
-            return truncate(
-                squish(
-                    match.group(1)
-                ),
-                110,
-            )
+            return clean_spc_location(match.group(1))
 
     if kind == "fire":
-
         match = re.search(
-            r"(?is)"
-            r"(?:CRITICAL|ELEVATED) "
-            r"FIRE WEATHER AREA"
-            r"(?:S)? "
-            r"(?:FOR|ACROSS) "
-            r"(.*?)"
-            r"(?:\.|\n)",
+            r"(?is)(?:CRITICAL|ELEVATED) FIRE WEATHER AREA(?:S)? (?:FOR|ACROSS) (.*?)(?:\.|\n)",
             text,
         )
-
         if match:
-
-            return truncate(
-                squish(
-                    match.group(1)
-                ),
-                110,
-            )
+            return clean_spc_location(match.group(1))
 
     return "United States"
 
@@ -4560,62 +4593,28 @@ def find_local_issue_clock(
 ) -> str:
 
     match = re.search(
-        r"\b(\d{1,4})\s+"
-        r"(AM|PM)\s+"
-        r"([A-Z]{2,5})\s+"
-        r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b",
+        r"\b(\d{1,4})\s+(AM|PM)\s+([A-Z]{2,5})\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b",
         text,
         re.I,
     )
 
     if not match:
-
         return ""
 
-    (
-        digits,
-        ampm,
-        zone,
-    ) = match.groups()
-
-    digits = (
-        digits.strip()
-    )
+    digits, ampm, zone = match.groups()
+    digits = digits.strip()
 
     if len(digits) <= 2:
-
-        hour = int(
-            digits
-        )
-
+        hour = int(digits)
         minute = 0
-
     elif len(digits) == 3:
-
-        hour = int(
-            digits[0]
-        )
-
-        minute = int(
-            digits[1:]
-        )
-
+        hour = int(digits[0])
+        minute = int(digits[1:])
     else:
+        hour = int(digits[:-2])
+        minute = int(digits[-2:])
 
-        hour = int(
-            digits[:-2]
-        )
-
-        minute = int(
-            digits[-2:]
-        )
-
-    return (
-        f"{hour}:"
-        f"{minute:02d} "
-        f"{ampm.upper()} "
-        f"{zone.upper()}"
-    )
+    return f"{hour}:{minute:02d} {ampm.upper()} {zone.upper()}"
 
 
 def find_spc_expiry_text(
@@ -4623,197 +4622,504 @@ def find_spc_expiry_text(
 ) -> str:
 
     match = re.search(
-        r"Expires:\s*"
-        r"("
-        r"[A-Za-z]{3}\s+"
-        r"\d{1,2},\s*"
-        r"\d{4}\s+"
-        r"at\s+"
-        r"\d{4}\s+UTC"
-        r")",
+        r"Expires:\s*([A-Za-z]{3}\s+\d{1,2},\s*\d{4}\s+at\s+\d{4}\s+UTC)",
         text,
         re.I,
     )
-
     if match:
-
         return match.group(1)
 
-    valid = re.search(
-        r"\bValid\s+"
-        r"\d{6}Z\s*-\s*"
-        r"(\d{6})Z\b",
-        text,
-        re.I,
-    )
-
+    valid = re.search(r"\bValid\s+\d{6}Z\s*-\s*(\d{6})Z\b", text, re.I)
     if valid:
-
-        return (
-            f"{valid.group(1)}Z"
-        )
+        return f"{valid.group(1)}Z"
 
     return ""
+
+
+def spc_day_number(
+    item: RSSItem,
+) -> int:
+
+    match = re.search(r"Day\s*([1-8])", f"{item.title} {item.text}", re.I)
+    if not match:
+        raise RetryableSourceDataError("SPC convective item is missing a day number")
+    return int(match.group(1))
+
+
+def spc_percent_string(
+    value: Any,
+) -> str:
+
+    text = squish(str(value or ""))
+    if not text:
+        return ""
+    if "%" in text:
+        return text
+    digits = digits_only(text)
+    if digits:
+        return f"{int(digits)}%"
+    return text
+
+
+def spc_max_label(
+    features: list[dict[str, Any]],
+    *,
+    categorical: bool = False,
+) -> str:
+
+    ranked: list[tuple[int, str]] = []
+
+    for feature in features:
+        attrs = feature.get("attributes") or {}
+        label = first_nonempty([attrs.get("label2"), attrs.get("label")])
+        dn_value = attrs.get("dn")
+
+        if categorical:
+            try:
+                score = int(dn_value)
+            except Exception:
+                label_digits = digits_only(label)
+                score = int(label_digits) if label_digits else 0
+            if label:
+                ranked.append((score, label))
+            continue
+
+        score_text = spc_percent_string(label) or spc_percent_string(dn_value)
+        digits = digits_only(score_text)
+        if digits:
+            ranked.append((int(digits), f"{int(digits)}%"))
+
+    if not ranked:
+        return ""
+
+    ranked.sort(key=lambda item: item[0])
+    return ranked[-1][1]
+
+
+def default_spc_map_extent_for_day(
+    day: int,
+) -> tuple[float, float, float, float]:
+
+    return (-128, 22, -65, 52)
+
+
+def build_service_map_mercator(
+    mapserver: str,
+    layers: str,
+    bbox: tuple[float, float, float, float],
+    *,
+    prefix: str,
+) -> str:
+
+    width = 1200
+    height = 760
+
+    product = export_map_image(
+        f"{mapserver}/export",
+        bbox,
+        width,
+        height,
+        layers=layers,
+    )
+
+    refs = export_map_image(
+        REFERENCE_EXPORT_URL,
+        bbox,
+        width,
+        height,
+        layers="show:2,3",
+    )
+
+    base = Image.new("RGBA", (width, height), (245, 246, 247, 255))
+    base.alpha_composite(product)
+    base.alpha_composite(refs)
+
+    tmp = tempfile.NamedTemporaryFile(prefix=prefix, suffix=".jpg", delete=False)
+    tmp.close()
+
+    base.convert("RGB").save(tmp.name, "JPEG", quality=91, optimize=True)
+    return tmp.name
+
+
+def mercator_points_from_arcgis_geometry(
+    geometry: dict[str, Any],
+    *,
+    default_wkid: int,
+) -> list[tuple[float, float]]:
+
+    spatial_reference = geometry.get("spatialReference") or {}
+    wkid = int(spatial_reference.get("latestWkid") or spatial_reference.get("wkid") or default_wkid)
+
+    points: list[tuple[float, float]] = []
+
+    for ring in geometry.get("rings") or []:
+        for coordinate in ring:
+            if not isinstance(coordinate, (list, tuple)) or len(coordinate) < 2:
+                continue
+            x = float(coordinate[0])
+            y = float(coordinate[1])
+            if wkid in (4326, 4269):
+                points.append(lonlat_to_web_mercator(x, y))
+            else:
+                points.append((x, y))
+
+    return points
+
+
+def mercator_bbox_from_points(
+    points: list[tuple[float, float]],
+    width: int,
+    height: int,
+) -> tuple[float, float, float, float]:
+
+    if not points:
+        raise RetryableSourceDataError("No polygon coordinates were available")
+
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+
+    minx = min(xs)
+    maxx = max(xs)
+    miny = min(ys)
+    maxy = max(ys)
+
+    cx = (minx + maxx) / 2
+    cy = (miny + maxy) / 2
+
+    raw_w = max(maxx - minx, 120000.0) * 1.75
+    raw_h = max(maxy - miny, 90000.0) * 1.75
+
+    aspect = width / height
+    if raw_w / raw_h < aspect:
+        raw_w = raw_h * aspect
+    else:
+        raw_h = raw_w / aspect
+
+    return (
+        cx - raw_w / 2,
+        cy - raw_h / 2,
+        cx + raw_w / 2,
+        cy + raw_h / 2,
+    )
+
+
+def find_matching_mcd_feature(
+    number: str,
+) -> Optional[SPCGeometryMatch]:
+
+    features = arcgis_query_features(
+        SPC_MCD_MAPSERVER,
+        0,
+        out_fields="objectid,name,folderpath,popupinfo,idp_filedate,idp_ingestdate",
+        return_geometry=True,
+    )
+
+    target = digits_only(number)
+    candidates: list[SPCGeometryMatch] = []
+
+    for feature in features:
+        attrs = feature.get("attributes") or {}
+        feature_number = digits_only(attrs.get("name"))
+
+        if target and feature_number != target:
+            continue
+
+        name_text = str(attrs.get("name") or "")
+        if name_text and "noarea" in name_text.lower():
+            continue
+
+        geometry = feature.get("geometry") or {}
+        if not geometry.get("rings"):
+            continue
+
+        candidates.append(SPCGeometryMatch(dict(attrs), dict(geometry)))
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda match: str(match.attributes.get("idp_ingestdate") or match.attributes.get("idp_filedate") or "")
+    )
+    return candidates[-1]
+
+
+def find_matching_watch_feature(
+    product_name: str,
+    number: str,
+) -> Optional[SPCGeometryMatch]:
+
+    prod_type = "Tornado Watch" if "tornado" in product_name.lower() else "Severe Thunderstorm Watch"
+
+    features = arcgis_query_features(
+        WWA_MAPSERVER,
+        1,
+        where="prod_type = " + sql_quote(prod_type),
+        out_fields=(
+            "prod_type,msg_type,phenom,url,expiration,onset,ends,issuance,event,sig,wfo,idp_filedate,idp_ingestdate,cap_id"
+        ),
+        return_geometry=True,
+    )
+
+    target = digits_only(number)
+    candidates: list[SPCGeometryMatch] = []
+
+    for feature in features:
+        attrs = feature.get("attributes") or {}
+
+        if squish(str(attrs.get("prod_type") or "")) != prod_type:
+            continue
+
+        feature_number = digits_only(attrs.get("event"))
+        if target and feature_number != target:
+            continue
+
+        geometry = feature.get("geometry") or {}
+        if not geometry.get("rings"):
+            continue
+
+        candidates.append(SPCGeometryMatch(dict(attrs), dict(geometry)))
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda match: str(match.attributes.get("idp_ingestdate") or match.attributes.get("idp_filedate") or "")
+    )
+    return candidates[-1]
+
+
+def build_mcd_image(
+    feature: SPCGeometryMatch,
+) -> str:
+
+    points = mercator_points_from_arcgis_geometry(feature.geometry, default_wkid=4326)
+    bbox = mercator_bbox_from_points(points, 1200, 760)
+    return build_service_map_mercator(SPC_MCD_MAPSERVER, "show:0", bbox, prefix="spc_md_")
+
+
+def build_watch_image(
+    feature: SPCGeometryMatch,
+) -> str:
+
+    points = mercator_points_from_arcgis_geometry(feature.geometry, default_wkid=3857)
+    bbox = mercator_bbox_from_points(points, 1200, 760)
+    return build_service_map_mercator(WWA_MAPSERVER, "show:1", bbox, prefix="spc_watch_")
+
+
+def load_convective_snapshot(
+    day: int,
+) -> SPCConvectiveSnapshot:
+
+    layer_ids = SPC_OUTLOOK_LAYER_IDS.get(day)
+    if not layer_ids:
+        raise RetryableSourceDataError(f"No SPC outlook layer mapping exists for day {day}")
+
+    primary_layer = (
+        layer_ids.get("categorical")
+        or
+        layer_ids.get("probability")
+    )
+
+    if primary_layer is None:
+        raise RetryableSourceDataError(
+            f"SPC Day {day} has no usable GIS layer mapping"
+        )
+
+    category_features = arcgis_query_features(
+        SPC_OUTLOOK_MAPSERVER,
+        primary_layer,
+        out_fields="objectid,dn,valid,expire,idp_source,idp_filedate,idp_ingestdate,issue,label,label2,stroke,fill",
+        return_geometry=False,
+    )
+
+    if not category_features:
+        raise RetryableSourceDataError(
+            f"SPC Day {day} GIS data was not ready yet"
+        )
+
+    category = (
+        spc_max_label(category_features, categorical=True)
+        if "categorical" in layer_ids
+        else ""
+    )
+    issued = first_nonempty([(feature.get("attributes") or {}).get("issue") for feature in category_features])
+    valid = first_nonempty([(feature.get("attributes") or {}).get("valid") for feature in category_features])
+
+    tornado_risk = ""
+    hail_risk = ""
+    wind_risk = ""
+    severe_risk = ""
+
+    if day in (1, 2):
+        tornado_risk = spc_max_label(
+            arcgis_query_features(
+                SPC_OUTLOOK_MAPSERVER,
+                layer_ids["tornado"],
+                out_fields="objectid,dn,label,label2,issue,valid,idp_ingestdate",
+                return_geometry=False,
+            )
+        )
+        hail_risk = spc_max_label(
+            arcgis_query_features(
+                SPC_OUTLOOK_MAPSERVER,
+                layer_ids["hail"],
+                out_fields="objectid,dn,label,label2,issue,valid,idp_ingestdate",
+                return_geometry=False,
+            )
+        )
+        wind_risk = spc_max_label(
+            arcgis_query_features(
+                SPC_OUTLOOK_MAPSERVER,
+                layer_ids["wind"],
+                out_fields="objectid,dn,label,label2,issue,valid,idp_ingestdate",
+                return_geometry=False,
+            )
+        )
+        if not any((tornado_risk, hail_risk, wind_risk)):
+            raise RetryableSourceDataError(f"SPC Day {day} probability layers were not ready yet")
+    elif day == 3:
+        severe_risk = spc_max_label(
+            arcgis_query_features(
+                SPC_OUTLOOK_MAPSERVER,
+                layer_ids["severe"],
+                out_fields="objectid,dn,label,label2,issue,valid,idp_ingestdate",
+                return_geometry=False,
+            )
+        )
+        if not severe_risk:
+            raise RetryableSourceDataError("SPC Day 3 severe probability layer was not ready yet")
+
+    image_layer = (
+        layer_ids.get("categorical")
+        or
+        layer_ids.get("probability")
+    )
+
+    image_path = build_service_map(
+        SPC_OUTLOOK_MAPSERVER,
+        f"show:{image_layer}",
+        bbox_lonlat=default_spc_map_extent_for_day(day),
+        prefix=f"spc_day{day}_",
+    )
+
+    if not image_path:
+        raise RetryableSourceDataError(f"Could not render SPC Day {day} outlook image")
+
+    return SPCConvectiveSnapshot(
+        day=day,
+        category=category,
+        tornado_risk=tornado_risk,
+        wind_risk=wind_risk,
+        hail_risk=hail_risk,
+        severe_risk=severe_risk,
+        image_path=image_path,
+        issued=issued,
+        valid=valid,
+    )
 
 
 def render_spc(
     item: RSSItem,
     kind: str,
-) -> RenderedPost:
+) -> Optional[RenderedPost]:
 
-    (
-        product_name,
-        number,
-    ) = spc_product_name(
-        item,
-        kind,
-    )
-
-    page_text = (
-        item.multiline_text
-    )
-
-    soup: Optional[
-        BeautifulSoup
-    ] = None
+    product_name, number = spc_product_name(item, kind)
+    page_text = item.multiline_text
+    soup: Optional[BeautifulSoup] = None
 
     if item.link:
-
         try:
-
-            (
-                page_text,
-                soup,
-            ) = fetch_product_page(
-                item.link
-            )
-
+            page_text, soup = fetch_product_page(item.link)
         except Exception:
+            log.exception("Could not fetch SPC product page: %s", item.link)
 
-            log.exception(
-                "Could not fetch SPC "
-                "product page: %s",
-                item.link,
-            )
-
-    location = spc_location(
-        page_text,
-        kind,
-    )
-
-    issued = find_local_issue_clock(
-        page_text
-    )
-
-    expires = find_spc_expiry_text(
-        page_text
-    )
+    location = spc_location(page_text, kind)
+    issued = find_local_issue_clock(page_text)
+    expires = find_spc_expiry_text(page_text)
 
     time_line = ""
-
-    if (
-        issued
-        and
-        expires
-    ):
-
-        time_line = (
-            f"Issued {issued} "
-            f"Expires {expires}"
-        )
-
+    if issued and expires:
+        time_line = f"Issued {issued} Expires {expires}"
     elif issued:
-
-        time_line = (
-            f"Issued {issued}"
-        )
-
+        time_line = f"Issued {issued}"
     elif item.published:
-
-        time_line = (
-            "Issued "
-            +
-            item.published.strftime(
-                "%-I:%M %p UTC"
-            )
-        )
+        time_line = "Issued " + item.published.strftime("%-I:%M %p UTC")
 
     details: list[str] = []
+    image_path = ""
 
-    if kind == "md":
+    if kind == "convective":
+        day = spc_day_number(item)
+        snapshot = load_convective_snapshot(day)
+        image_path = snapshot.image_path
 
-        concerning = spc_field(
-            page_text,
-            "Concerning",
-        )
+        if snapshot.category:
+            details.append("Category: " + snapshot.category)
 
-        if concerning:
-
+        if day in (1, 2):
             details.append(
-                "Concerning: "
-                +
-                truncate(
-                    concerning,
-                    85,
+                "Max risks: "
+                f"Tornado {snapshot.tornado_risk or 'N/A'}, "
+                f"Wind {snapshot.wind_risk or 'N/A'}, "
+                f"Hail {snapshot.hail_risk or 'N/A'}"
+            )
+        elif day == 3:
+            details.append("Max severe risk: " + (snapshot.severe_risk or "N/A"))
+        elif day >= 4:
+            probability_layer = SPC_OUTLOOK_LAYER_IDS[day]["probability"]
+            probability_risk = spc_max_label(
+                arcgis_query_features(
+                    SPC_OUTLOOK_MAPSERVER,
+                    probability_layer,
+                    out_fields="objectid,dn,label,label2,issue,valid,idp_ingestdate",
+                    return_geometry=False,
                 )
             )
+            if probability_risk:
+                details.append("Max severe risk: " + probability_risk)
+
+        if not image_path:
+            raise RetryableSourceDataError(f"SPC Day {day} image was not ready yet")
+
+    elif kind == "md":
+        concerning = spc_field(page_text, "Concerning")
+        if concerning:
+            details.append("Concerning: " + truncate(concerning, 85))
 
         probability = re.search(
-            r"Probability of Watch Issuance"
-            r"\s*\.{3}\s*"
-            r"(\d+)\s*percent",
+            r"Probability of Watch Issuance\s*\.{3}\s*(\d+)\s*percent",
             page_text,
             re.I,
         )
-
         if probability:
+            details.append(f"Watch probability: {probability.group(1)}%")
 
-            details.append(
-                "Watch probability: "
-                f"{probability.group(1)}%"
-            )
+        match = find_matching_mcd_feature(number)
+        if not match:
+            raise RetryableSourceDataError(f"MCD {number or product_name} polygon GIS data was not ready yet")
 
-    hazards = extract_hazards(
-        page_text,
-        product_name,
-    )
+        image_path = build_mcd_image(match)
+        if not image_path:
+            raise RetryableSourceDataError(f"MCD {number or product_name} image could not be rendered")
 
-    if hazards:
+    elif kind == "watch":
+        match = find_matching_watch_feature(product_name, number)
+        if not match:
+            raise RetryableSourceDataError(f"Watch {number or product_name} polygon GIS data was not ready yet")
 
-        details.append(
-            "Hazards: "
-            +
-            ", ".join(
-                hazards
-            )
-        )
+        image_path = build_watch_image(match)
+        if not image_path:
+            raise RetryableSourceDataError(f"Watch {number or product_name} image could not be rendered")
 
-    image_path = ""
-
-    if (
-        soup is not None
-        and
-        item.link
-    ):
-
+    elif soup is not None and item.link:
         try:
-
-            image_path = (
-                page_product_image(
-                    item.link,
-                    soup,
-                    kind,
-                    number,
-                )
-            )
-
+            image_path = page_product_image(item.link, soup, kind, number)
         except Exception:
+            log.exception("Could not obtain SPC image for %s", product_name)
 
-            log.exception(
-                "Could not obtain "
-                "SPC image for %s",
-                product_name,
-            )
+    hazards = extract_hazards(page_text, product_name)
+    if hazards and kind != "convective":
+        details.append("Hazards: " + ", ".join(hazards))
 
     return RenderedPost(
         fit_post(
@@ -4834,43 +5140,18 @@ def poll_spc(
     x: XPublisher,
 ) -> None:
 
-    for (
-        source,
-        (
-            url,
-            kind,
-        ),
-    ) in SPC_FEEDS.items():
-
+    for source, (url, kind) in SPC_FEEDS.items():
         try:
-
             process_rss_source(
                 db,
                 x,
                 source=source,
                 url=url,
-                item_filter=(
-                    lambda item, k=kind:
-                        spc_item_is_real(
-                            item,
-                            k,
-                        )
-                ),
-                renderer=(
-                    lambda item, k=kind:
-                        render_spc(
-                            item,
-                            k,
-                        )
-                ),
+                item_filter=lambda item, k=kind: spc_item_is_real(item, k),
+                renderer=lambda item, k=kind: render_spc(item, k),
             )
-
         except Exception:
-
-            log.exception(
-                "SPC source failed: %s",
-                source,
-            )
+            log.exception("SPC source failed: %s", source)
 
 
 # =============================================================================

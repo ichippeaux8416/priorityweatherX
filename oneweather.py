@@ -28,253 +28,41 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-26-mapbox-spc-v8'
+BUILD_ID = '2026-08-26-mapbox-spc-v8.1-watchfix'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
-
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
-MAPBOX_STYLE = (
-    os.getenv(
-        'MAPBOX_STYLE',
-        'mapbox/light-v11',
-    ).strip()
-    or
-    'mapbox/light-v11'
-)
-
+MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
 X_CLIENT_ID = os.getenv('X_CLIENT_ID', '').strip()
 X_CLIENT_SECRET = os.getenv('X_CLIENT_SECRET', '').strip()
 X_ACCESS_TOKEN = os.getenv('X_ACCESS_TOKEN', '').strip()
 X_REFRESH_TOKEN = os.getenv('X_REFRESH_TOKEN', '').strip()
-
-DB_PATH = os.getenv(
-    'DB_PATH',
-    '/var/data/oneweather.sqlite3',
-).strip()
-
-DRY_RUN = (
-    os.getenv(
-        'DRY_RUN',
-        'false',
-    ).lower()
-    in {
-        '1',
-        'true',
-        'yes',
-        'on',
-    }
-)
-
-INCLUDE_SOURCE_URLS = (
-    os.getenv(
-        'INCLUDE_SOURCE_URLS',
-        'false',
-    ).lower()
-    in {
-        '1',
-        'true',
-        'yes',
-        'on',
-    }
-)
-
-POST_TEXT_LIMIT = max(
-    180,
-    min(
-        270,
-        int(
-            os.getenv(
-                'POST_TEXT_LIMIT',
-                '265',
-            )
-        ),
-    ),
-)
-
-NWS_POLL_SECONDS = max(
-    30,
-    int(
-        os.getenv(
-            'NWS_POLL_SECONDS',
-            '30',
-        )
-    ),
-)
-
-SPC_POLL_SECONDS = max(
-    30,
-    int(
-        os.getenv(
-            'SPC_POLL_SECONDS',
-            '60',
-        )
-    ),
-)
-
-NHC_POLL_SECONDS = max(
-    30,
-    int(
-        os.getenv(
-            'NHC_POLL_SECONDS',
-            '60',
-        )
-    ),
-)
-
-NHC_FULL_SWEEP_SECONDS = max(
-    300,
-    int(
-        os.getenv(
-            'NHC_FULL_SWEEP_SECONDS',
-            '600',
-        )
-    ),
-)
-
-WPC_ERO_POLL_SECONDS = max(
-    60,
-    int(
-        os.getenv(
-            'WPC_ERO_POLL_SECONDS',
-            '120',
-        )
-    ),
-)
-
-WPC_WINTER_POLL_SECONDS = max(
-    60,
-    int(
-        os.getenv(
-            'WPC_WINTER_POLL_SECONDS',
-            '300',
-        )
-    ),
-)
-
-TORNADO_MAX_POST_AGE_MINUTES = max(
-    5,
-    int(
-        os.getenv(
-            'TORNADO_MAX_POST_AGE_MINUTES',
-            '30',
-        )
-    ),
-)
-
-WINTER_ALERT_MAX_POST_AGE_MINUTES = max(
-    30,
-    int(
-        os.getenv(
-            'WINTER_ALERT_MAX_POST_AGE_MINUTES',
-            '360',
-        )
-    ),
-)
-
+DB_PATH = os.getenv('DB_PATH', '/var/data/oneweather.sqlite3').strip()
+DRY_RUN = os.getenv('DRY_RUN', 'false').lower() in {'1', 'true', 'yes', 'on'}
+INCLUDE_SOURCE_URLS = os.getenv('INCLUDE_SOURCE_URLS', 'false').lower() in {'1', 'true', 'yes', 'on'}
+POST_TEXT_LIMIT = max(180, min(270, int(os.getenv('POST_TEXT_LIMIT', '265'))))
+NWS_POLL_SECONDS = max(30, int(os.getenv('NWS_POLL_SECONDS', '30')))
+SPC_POLL_SECONDS = max(30, int(os.getenv('SPC_POLL_SECONDS', '60')))
+NHC_POLL_SECONDS = max(30, int(os.getenv('NHC_POLL_SECONDS', '60')))
+NHC_FULL_SWEEP_SECONDS = max(300, int(os.getenv('NHC_FULL_SWEEP_SECONDS', '600')))
+WPC_ERO_POLL_SECONDS = max(60, int(os.getenv('WPC_ERO_POLL_SECONDS', '120')))
+WPC_WINTER_POLL_SECONDS = max(60, int(os.getenv('WPC_WINTER_POLL_SECONDS', '300')))
+TORNADO_MAX_POST_AGE_MINUTES = max(5, int(os.getenv('TORNADO_MAX_POST_AGE_MINUTES', '30')))
+WINTER_ALERT_MAX_POST_AGE_MINUTES = max(30, int(os.getenv('WINTER_ALERT_MAX_POST_AGE_MINUTES', '360')))
 NWS_QUERY_BACKFILL_MAX_MINUTES = max(
     15,
     min(
         10080,
-        int(
-            os.getenv(
-                'NWS_QUERY_BACKFILL_MAX_MINUTES',
-                '360',
-            )
-        ),
+        int(os.getenv('NWS_QUERY_BACKFILL_MAX_MINUTES', '360')),
     ),
 )
-
-WPC_HSD_MAX_AGE_HOURS = max(
-    12,
-    int(
-        os.getenv(
-            'WPC_HSD_MAX_AGE_HOURS',
-            '36',
-        )
-    ),
-)
-
-ENABLE_SPC_FIRE = (
-    os.getenv(
-        'ENABLE_SPC_FIRE',
-        'true',
-    ).lower()
-    in {
-        '1',
-        'true',
-        'yes',
-        'on',
-    }
-)
-
-ENABLE_NHC_DISCUSSIONS = (
-    os.getenv(
-        'ENABLE_NHC_DISCUSSIONS',
-        'true',
-    ).lower()
-    in {
-        '1',
-        'true',
-        'yes',
-        'on',
-    }
-)
-
-ENABLE_NHC_FORECAST_ADVISORIES = (
-    os.getenv(
-        'ENABLE_NHC_FORECAST_ADVISORIES',
-        'false',
-    ).lower()
-    in {
-        '1',
-        'true',
-        'yes',
-        'on',
-    }
-)
-
-ENABLE_WPC_DAY4_DAY5_ERO = (
-    os.getenv(
-        'ENABLE_WPC_DAY4_DAY5_ERO',
-        'true',
-    ).lower()
-    in {
-        '1',
-        'true',
-        'yes',
-        'on',
-    }
-)
-
-ENABLE_WPC_HEAVY_SNOW_DISCUSSION = (
-    os.getenv(
-        'ENABLE_WPC_HEAVY_SNOW_DISCUSSION',
-        'true',
-    ).lower()
-    in {
-        '1',
-        'true',
-        'yes',
-        'on',
-    }
-)
-
-ENABLE_WPC_WINTER_PACKAGES = (
-    os.getenv(
-        'ENABLE_WPC_WINTER_PACKAGES',
-        'true',
-    ).lower()
-    in {
-        '1',
-        'true',
-        'yes',
-        'on',
-    }
-)
-
-LOG_LEVEL = os.getenv(
-    'LOG_LEVEL',
-    'INFO',
-).upper()
+WPC_HSD_MAX_AGE_HOURS = max(12, int(os.getenv('WPC_HSD_MAX_AGE_HOURS', '36')))
+ENABLE_SPC_FIRE = os.getenv('ENABLE_SPC_FIRE', 'true').lower() in {'1', 'true', 'yes', 'on'}
+ENABLE_NHC_DISCUSSIONS = os.getenv('ENABLE_NHC_DISCUSSIONS', 'true').lower() in {'1', 'true', 'yes', 'on'}
+ENABLE_NHC_FORECAST_ADVISORIES = os.getenv('ENABLE_NHC_FORECAST_ADVISORIES', 'false').lower() in {'1', 'true', 'yes', 'on'}
+ENABLE_WPC_DAY4_DAY5_ERO = os.getenv('ENABLE_WPC_DAY4_DAY5_ERO', 'true').lower() in {'1', 'true', 'yes', 'on'}
+ENABLE_WPC_HEAVY_SNOW_DISCUSSION = os.getenv('ENABLE_WPC_HEAVY_SNOW_DISCUSSION', 'true').lower() in {'1', 'true', 'yes', 'on'}
+ENABLE_WPC_WINTER_PACKAGES = os.getenv('ENABLE_WPC_WINTER_PACKAGES', 'true').lower() in {'1', 'true', 'yes', 'on'}
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 
 X_TOKEN_URL = 'https://api.x.com/2/oauth2/token'
 X_ME_URL = 'https://api.x.com/2/users/me'
@@ -307,36 +95,21 @@ if ENABLE_SPC_FIRE:
     )
 
 NHC_TWO_FEEDS = {
-    'nhc_two_atlantic':
-        'https://www.nhc.noaa.gov/xml/TWOAT.xml',
-
-    'nhc_two_epac':
-        'https://www.nhc.noaa.gov/xml/TWOEP.xml',
-
-    'nhc_two_cpac':
-        'https://www.nhc.noaa.gov/xml/TWOCP.xml',
+    'nhc_two_atlantic': 'https://www.nhc.noaa.gov/xml/TWOAT.xml',
+    'nhc_two_epac': 'https://www.nhc.noaa.gov/xml/TWOEP.xml',
+    'nhc_two_cpac': 'https://www.nhc.noaa.gov/xml/TWOCP.xml',
 }
 
 NHC_TWO_IMAGES = {
-    'nhc_two_atlantic':
-        'https://www.nhc.noaa.gov/xgtwo/two_atl_7d0.png',
-
-    'nhc_two_epac':
-        'https://www.nhc.noaa.gov/xgtwo/two_pac_7d0.png',
-
-    'nhc_two_cpac':
-        'https://www.nhc.noaa.gov/xgtwo/two_cpac_7d0.png',
+    'nhc_two_atlantic': 'https://www.nhc.noaa.gov/xgtwo/two_atl_7d0.png',
+    'nhc_two_epac': 'https://www.nhc.noaa.gov/xgtwo/two_pac_7d0.png',
+    'nhc_two_cpac': 'https://www.nhc.noaa.gov/xgtwo/two_cpac_7d0.png',
 }
 
 NHC_BASIN_INDEX_FEEDS = {
-    'atlantic':
-        'https://www.nhc.noaa.gov/index-at.xml',
-
-    'epac':
-        'https://www.nhc.noaa.gov/index-ep.xml',
-
-    'cpac':
-        'https://www.nhc.noaa.gov/index-cp.xml',
+    'atlantic': 'https://www.nhc.noaa.gov/index-at.xml',
+    'epac': 'https://www.nhc.noaa.gov/index-ep.xml',
+    'cpac': 'https://www.nhc.noaa.gov/index-cp.xml',
 }
 
 NHC_BASIN_CODES = {
@@ -411,20 +184,14 @@ WINTER_ALERT_EVENTS = {
 }
 
 logging.basicConfig(
-    level=getattr(
-        logging,
-        LOG_LEVEL,
-        logging.INFO,
-    ),
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
     format='%(asctime)sZ %(levelname)s %(message)s',
     datefmt='%Y-%m-%dT%H:%M:%S',
 )
 
 logging.Formatter.converter = time.gmtime
 
-log = logging.getLogger(
-    'priorityweather'
-)
+log = logging.getLogger('priorityweather')
 
 STOP_REQUESTED = False
 
@@ -439,28 +206,18 @@ def request_stop(
     STOP_REQUESTED = True
 
     log.info(
-        'Received signal %s; '
-        'stopping after current work',
+        'Received signal %s; stopping after current work',
         signum,
     )
 
 
-signal.signal(
-    signal.SIGTERM,
-    request_stop,
-)
-
-signal.signal(
-    signal.SIGINT,
-    request_stop,
-)
+signal.signal(signal.SIGTERM, request_stop)
+signal.signal(signal.SIGINT, request_stop)
 
 
 def utcnow() -> datetime:
 
-    return datetime.now(
-        timezone.utc
-    )
+    return datetime.now(timezone.utc)
 
 
 def iso_z(
@@ -468,17 +225,10 @@ def iso_z(
 ) -> str:
 
     return (
-        dt.astimezone(
-            timezone.utc
-        )
-        .replace(
-            microsecond=0
-        )
+        dt.astimezone(timezone.utc)
+        .replace(microsecond=0)
         .isoformat()
-        .replace(
-            '+00:00',
-            'Z',
-        )
+        .replace('+00:00', 'Z')
     )
 
 
@@ -504,9 +254,7 @@ def squish(
     return re.sub(
         r'\s+',
         ' ',
-        html.unescape(
-            value
-        ),
+        html.unescape(value),
     ).strip()
 
 
@@ -518,51 +266,25 @@ def remove_emojis(
 
     for ch in value:
 
-        cp = ord(
-            ch
-        )
+        cp = ord(ch)
 
         if (
-            0x1F000
-            <=
-            cp
-            <=
-            0x1FAFF
+            0x1F000 <= cp <= 0x1FAFF
             or
-            0x2600
-            <=
-            cp
-            <=
-            0x26FF
+            0x2600 <= cp <= 0x26FF
             or
-            0x2700
-            <=
-            cp
-            <=
-            0x27BF
+            0x2700 <= cp <= 0x27BF
             or
-            0xFE00
-            <=
-            cp
-            <=
-            0xFE0F
+            0xFE00 <= cp <= 0xFE0F
             or
-            0x1F1E6
-            <=
-            cp
-            <=
-            0x1F1FF
+            0x1F1E6 <= cp <= 0x1F1FF
         ):
 
             continue
 
-        out.append(
-            ch
-        )
+        out.append(ch)
 
-    return ''.join(
-        out
-    )
+    return ''.join(out)
 
 
 def html_to_text(
@@ -571,7 +293,6 @@ def html_to_text(
 ) -> str:
 
     if not value:
-
         return ''
 
     soup = BeautifulSoup(
@@ -605,9 +326,7 @@ def html_to_text(
             if line
         )
 
-    return squish(
-        text
-    )
+    return squish(text)
 
 
 def truncate(
@@ -615,30 +334,18 @@ def truncate(
     limit: int,
 ) -> str:
 
-    value = squish(
-        value
-    )
+    value = squish(value)
 
-    if len(
-        value
-    ) <= limit:
-
+    if len(value) <= limit:
         return value
 
     if limit <= 1:
+        return value[:limit]
 
-        return value[
-            :limit
-        ]
-
-    cut = value[
-        :limit - 1
-    ].rstrip()
+    cut = value[:limit - 1].rstrip()
 
     if (
-        ' '
-        in
-        cut
+        ' ' in cut
         and
         len(
             cut.rsplit(
@@ -659,11 +366,7 @@ def truncate(
             1,
         )[0]
 
-    return (
-        cut
-        +
-        '...'
-    )
+    return cut + '...'
 
 
 def fit_post(
@@ -697,26 +400,17 @@ def fit_post(
     budget = (
         POST_TEXT_LIMIT
         -
-        len(
-            suffix
-        )
+        len(suffix)
     )
 
     if budget < 80:
 
         suffix = ''
+        budget = POST_TEXT_LIMIT
 
-        budget = (
-            POST_TEXT_LIMIT
-        )
+    text = '\n'.join(clean)
 
-    text = '\n'.join(
-        clean
-    )
-
-    if len(
-        text
-    ) > budget:
+    if len(text) > budget:
 
         text = truncate(
             text,
@@ -735,12 +429,9 @@ def parse_any_datetime(
 ) -> Optional[datetime]:
 
     if not value:
-
         return None
 
-    value = (
-        value.strip()
-    )
+    value = value.strip()
 
     try:
 
@@ -754,8 +445,7 @@ def parse_any_datetime(
         if dt.tzinfo is None:
 
             dt = dt.replace(
-                tzinfo=
-                    timezone.utc
+                tzinfo=timezone.utc
             )
 
         return dt.astimezone(
@@ -767,15 +457,12 @@ def parse_any_datetime(
 
     try:
 
-        dt = parsedate_to_datetime(
-            value
-        )
+        dt = parsedate_to_datetime(value)
 
         if dt.tzinfo is None:
 
             dt = dt.replace(
-                tzinfo=
-                    timezone.utc
+                tzinfo=timezone.utc
             )
 
         return dt.astimezone(
@@ -791,12 +478,9 @@ def age_minutes(
     value: Optional[str],
 ) -> Optional[float]:
 
-    dt = parse_any_datetime(
-        value
-    )
+    dt = parse_any_datetime(value)
 
     if not dt:
-
         return None
 
     return max(
@@ -815,15 +499,10 @@ def format_utc_clock(
     value: str,
 ) -> str:
 
-    dt = parse_any_datetime(
-        value
-    )
+    dt = parse_any_datetime(value)
 
     if not dt:
-
-        return squish(
-            value
-        )
+        return squish(value)
 
     return dt.strftime(
         '%-I:%M %p UTC'
@@ -836,9 +515,7 @@ def first_parameter(
 ) -> str:
 
     lowered = {
-        str(
-            key
-        ).lower():
+        str(key).lower():
             value
         for key, value
         in (
@@ -850,10 +527,8 @@ def first_parameter(
 
     for name in names:
 
-        value = (
-            lowered.get(
-                name.lower()
-            )
+        value = lowered.get(
+            name.lower()
         )
 
         if (
@@ -866,17 +541,13 @@ def first_parameter(
         ):
 
             return squish(
-                str(
-                    value[0]
-                )
+                str(value[0])
             )
 
         if value is not None:
 
             return squish(
-                str(
-                    value
-                )
+                str(value)
             )
 
     return ''
@@ -894,9 +565,7 @@ def all_parameter_values(
     ).items():
 
         if (
-            str(
-                key
-            ).lower()
+            str(key).lower()
             ==
             name.lower()
         ):
@@ -907,9 +576,7 @@ def all_parameter_values(
             ):
 
                 return [
-                    str(
-                        item
-                    )
+                    str(item)
                     for item
                     in value
                 ]
@@ -917,9 +584,7 @@ def all_parameter_values(
             if value is not None:
 
                 return [
-                    str(
-                        value
-                    )
+                    str(value)
                 ]
 
             return []
@@ -950,9 +615,7 @@ def extract_hazards(
             label not in hazards
         ):
 
-            hazards.append(
-                label
-            )
+            hazards.append(label)
 
     add(
         'Tornadoes',
@@ -963,10 +626,8 @@ def extract_hazards(
     add(
         'Damaging winds',
         any(
-            phrase
-            in lower
-            for phrase
-            in (
+            phrase in lower
+            for phrase in (
                 'damaging wind',
                 'damaging gust',
                 'severe wind',
@@ -977,10 +638,8 @@ def extract_hazards(
     add(
         'Large hail',
         any(
-            phrase
-            in lower
-            for phrase
-            in (
+            phrase in lower
+            for phrase in (
                 'large hail',
                 'severe hail',
                 'inch hail',
@@ -991,10 +650,8 @@ def extract_hazards(
     add(
         'Flash flooding',
         any(
-            phrase
-            in lower
-            for phrase
-            in (
+            phrase in lower
+            for phrase in (
                 'flash flood',
                 'excessive rainfall',
             )
@@ -1004,10 +661,8 @@ def extract_hazards(
     add(
         'Heavy snow',
         any(
-            phrase
-            in lower
-            for phrase
-            in (
+            phrase in lower
+            for phrase in (
                 'heavy snow',
                 'blizzard',
             )
@@ -1017,10 +672,8 @@ def extract_hazards(
     add(
         'Icing',
         any(
-            phrase
-            in lower
-            for phrase
-            in (
+            phrase in lower
+            for phrase in (
                 'freezing rain',
                 'significant icing',
                 'ice accumulation',
@@ -1028,9 +681,7 @@ def extract_hazards(
         ),
     )
 
-    return hazards[
-        :3
-    ]
+    return hazards[:3]
 
 
 def validate_environment() -> None:
@@ -1066,25 +717,18 @@ def validate_environment() -> None:
 
             if not value:
 
-                missing.append(
-                    name
-                )
+                missing.append(name)
 
     if missing:
 
         raise SystemExit(
-            'Missing required '
-            'environment variables: '
+            'Missing required environment variables: '
             +
-            ', '.join(
-                missing
-            )
+            ', '.join(missing)
         )
 
     parent = (
-        Path(
-            DB_PATH
-        )
+        Path(DB_PATH)
         .expanduser()
         .resolve()
         .parent
@@ -1315,9 +959,7 @@ class StateDB:
         ).fetchone()
 
         return (
-            str(
-                row[0]
-            )
+            str(row[0])
             if row
             else
             ''
@@ -1477,12 +1119,8 @@ class StateDB:
         ).fetchall()
 
         return {
-            str(
-                key
-            ):
-                int(
-                    value
-                )
+            str(key):
+                int(value)
             for key, value
             in rows
         }
@@ -1520,33 +1158,17 @@ class XOAuth2:
     ):
 
         self.db = db
+        self.client_id = X_CLIENT_ID
+        self.client_secret = X_CLIENT_SECRET
+        self.env_access_token = X_ACCESS_TOKEN
+        self.env_refresh_token = X_REFRESH_TOKEN
 
-        self.client_id = (
-            X_CLIENT_ID
+        self.db_access_token = db.get_meta(
+            'x:access_token'
         )
 
-        self.client_secret = (
-            X_CLIENT_SECRET
-        )
-
-        self.env_access_token = (
-            X_ACCESS_TOKEN
-        )
-
-        self.env_refresh_token = (
-            X_REFRESH_TOKEN
-        )
-
-        self.db_access_token = (
-            db.get_meta(
-                'x:access_token'
-            )
-        )
-
-        self.db_refresh_token = (
-            db.get_meta(
-                'x:refresh_token'
-            )
+        self.db_refresh_token = db.get_meta(
+            'x:refresh_token'
         )
 
         self.access_token = (
@@ -1613,13 +1235,8 @@ class XOAuth2:
                 f'{payload!r}'
             )
 
-        self.access_token = (
-            access
-        )
-
-        self.db_access_token = (
-            access
-        )
+        self.access_token = access
+        self.db_access_token = access
 
         self.db.set_meta(
             'x:access_token',
@@ -1628,13 +1245,8 @@ class XOAuth2:
 
         if refresh:
 
-            self.refresh_token_value = (
-                refresh
-            )
-
-            self.db_refresh_token = (
-                refresh
-            )
+            self.refresh_token_value = refresh
+            self.db_refresh_token = refresh
 
             self.db.set_meta(
                 'x:refresh_token',
@@ -1697,9 +1309,7 @@ class XOAuth2:
                 'is available'
             )
 
-        auth = (
-            self._token_auth()
-        )
+        auth = self._token_auth()
 
         last_rejection = ''
 
@@ -1914,17 +1524,13 @@ class XPublisher:
         db: StateDB,
     ):
 
-        self.dry_run = (
-            DRY_RUN
-        )
+        self.dry_run = DRY_RUN
 
         self.oauth = (
             None
             if self.dry_run
             else
-            XOAuth2(
-                db
-            )
+            XOAuth2(db)
         )
 
     @staticmethod
@@ -1976,10 +1582,7 @@ class XPublisher:
         media_type: str,
     ) -> requests.Response:
 
-        assert (
-            self.oauth
-            is not None
-        )
+        assert self.oauth is not None
 
         payload = {
             'media':
@@ -2019,10 +1622,7 @@ class XPublisher:
         media_type: str,
     ) -> requests.Response:
 
-        assert (
-            self.oauth
-            is not None
-        )
+        assert self.oauth is not None
 
         init = self.oauth.request(
             'POST',
@@ -2035,9 +1635,7 @@ class XPublisher:
                     'tweet_image',
 
                 'total_bytes':
-                    len(
-                        raw
-                    ),
+                    len(raw),
 
                 'shared':
                     False,
@@ -2142,15 +1740,10 @@ class XPublisher:
 
             return 'dry-run-media'
 
-        assert (
-            self.oauth
-            is not None
-        )
+        assert self.oauth is not None
 
         suffix = (
-            Path(
-                path
-            )
+            Path(path)
             .suffix
             .lower()
         )
@@ -2170,9 +1763,7 @@ class XPublisher:
         )
 
         if (
-            size
-            <=
-            0
+            size <= 0
             or
             size
             >
@@ -2193,15 +1784,11 @@ class XPublisher:
             'rb',
         ) as file_handle:
 
-            raw = (
-                file_handle.read()
-            )
+            raw = file_handle.read()
 
-        response = (
-            self._upload_image_json(
-                raw,
-                media_type,
-            )
+        response = self._upload_image_json(
+            raw,
+            media_type,
         )
 
         if not (
@@ -2212,15 +1799,8 @@ class XPublisher:
             300
         ):
 
-            simple_status = (
-                response.status_code
-            )
-
-            simple_body = (
-                response.text[
-                    :500
-                ]
-            )
+            simple_status = response.status_code
+            simple_body = response.text[:500]
 
             log.warning(
                 'X simple media upload '
@@ -2231,11 +1811,9 @@ class XPublisher:
 
             try:
 
-                response = (
-                    self._upload_image_chunked(
-                        raw,
-                        media_type,
-                    )
+                response = self._upload_image_chunked(
+                    raw,
+                    media_type,
                 )
 
             except XError as exc:
@@ -2360,8 +1938,7 @@ class XPublisher:
         ):
 
             raise XRejectedError(
-                'X media processing '
-                'failed: '
+                'X media processing failed: '
                 f'{processing!r}'
             )
 
@@ -2412,10 +1989,7 @@ class XPublisher:
 
             return 'dry-run-post'
 
-        assert (
-            self.oauth
-            is not None
-        )
+        assert self.oauth is not None
 
         payload: dict[
             str,
@@ -2448,11 +2022,7 @@ class XPublisher:
             ambiguous_if_sent=True,
         )
 
-        if (
-            response.status_code
-            ==
-            429
-        ):
+        if response.status_code == 429:
 
             raise XRetryableError(
                 'X create-post '
@@ -2525,10 +2095,7 @@ class XPublisher:
 
             return 'dry-run'
 
-        assert (
-            self.oauth
-            is not None
-        )
+        assert self.oauth is not None
 
         response = self.oauth.request(
             'GET',
@@ -2572,9 +2139,7 @@ class XPublisher:
                 self.oauth.env_access_token,
             )
 
-            if (
-                self.oauth.env_refresh_token
-            ):
+            if self.oauth.env_refresh_token:
 
                 self.oauth.db.set_meta(
                     'x:refresh_token',
@@ -2610,7 +2175,6 @@ class XPublisher:
 class RenderedPost:
 
     text: str
-
     image_path: str = ''
 
 
@@ -2641,13 +2205,11 @@ def publish_once(
             source,
             item_key,
             'posted',
-            tweet_id=
-                tweet_id,
+            tweet_id=tweet_id,
         )
 
         log.info(
-            'Posted %s %s -> '
-            'X id %s',
+            'Posted %s %s -> X id %s',
             source,
             item_key[:16],
             tweet_id,
@@ -2676,10 +2238,7 @@ def publish_once(
             source,
             item_key,
             'rejected',
-            error=
-                repr(
-                    exc
-                ),
+            error=repr(exc),
         )
 
         log.error(
@@ -2695,10 +2254,7 @@ def publish_once(
             source,
             item_key,
             'ambiguous',
-            error=
-                repr(
-                    exc
-                ),
+            error=repr(exc),
         )
 
         log.error(
@@ -2716,10 +2272,7 @@ def publish_once(
             source,
             item_key,
             'ambiguous',
-            error=
-                repr(
-                    exc
-                ),
+            error=repr(exc),
         )
 
         log.exception(
@@ -2760,40 +2313,26 @@ def image_bytes_to_temp(
 ) -> str:
 
     image = Image.open(
-        io.BytesIO(
-            content
-        )
+        io.BytesIO(content)
     )
 
     try:
 
-        image.seek(
-            0
-        )
+        image.seek(0)
 
     except Exception:
         pass
 
-    image = image.convert(
-        'RGB'
-    )
+    image = image.convert('RGB')
 
     max_side = 1800
 
-    if (
-        max(
-            image.size
-        )
-        >
-        max_side
-    ):
+    if max(image.size) > max_side:
 
         scale = (
             max_side
             /
-            max(
-                image.size
-            )
+            max(image.size)
         )
 
         image = image.resize(
@@ -2818,12 +2357,10 @@ def image_bytes_to_temp(
             Image.Resampling.LANCZOS,
         )
 
-    tmp = (
-        tempfile.NamedTemporaryFile(
-            prefix=prefix,
-            suffix='.jpg',
-            delete=False,
-        )
+    tmp = tempfile.NamedTemporaryFile(
+        prefix=prefix,
+        suffix='.jpg',
+        delete=False,
     )
 
     tmp.close()
@@ -2844,9 +2381,7 @@ def image_bytes_to_temp(
         >
         4_700_000
         and
-        quality
-        >
-        55
+        quality > 55
     ):
 
         quality -= 8
@@ -2901,11 +2436,7 @@ def fetch_product_page(
             'application/xhtml+xml'
     }
 
-    if (
-        'spc.noaa.gov'
-        in
-        url.lower()
-    ):
+    if 'spc.noaa.gov' in url.lower():
 
         headers.update(
             {
@@ -3016,11 +2547,8 @@ def page_product_image(
         ).lower()
 
         if any(
-            bad
-            in
-            descriptor
-            for bad
-            in (
+            bad in descriptor
+            for bad in (
                 'logo',
                 'legend',
                 'banner',
@@ -3033,25 +2561,16 @@ def page_product_image(
 
         score = 0
 
-        if (
-            'graphic'
-            in
-            descriptor
-        ):
+        if 'graphic' in descriptor:
 
             score += 8
 
         if (
-            kind
-            ==
-            'md'
+            kind == 'md'
             and
             any(
-                value
-                in
-                descriptor
-                for value
-                in (
+                value in descriptor
+                for value in (
                     'mcd',
                     'mesoscale',
                     'md',
@@ -3062,16 +2581,11 @@ def page_product_image(
             score += 25
 
         elif (
-            kind
-            ==
-            'watch'
+            kind == 'watch'
             and
             any(
-                value
-                in
-                descriptor
-                for value
-                in (
+                value in descriptor
+                for value in (
                     'watch',
                     'ww',
                 )
@@ -3080,26 +2594,15 @@ def page_product_image(
 
             score += 25
 
-        elif (
-            kind
-            ==
-            'convective'
-        ):
+        elif kind == 'convective':
 
-            if (
-                'categorical'
-                in
-                descriptor
-            ):
+            if 'categorical' in descriptor:
 
                 score += 30
 
             if any(
-                value
-                in
-                descriptor
-                for value
-                in (
+                value in descriptor
+                for value in (
                     'day1otlk',
                     'day2otlk',
                     'day3otlk',
@@ -3110,13 +2613,9 @@ def page_product_image(
                 score += 20
 
         elif (
-            kind
-            ==
-            'fire'
+            kind == 'fire'
             and
-            'fire'
-            in
-            descriptor
+            'fire' in descriptor
         ):
 
             score += 25
@@ -3124,9 +2623,7 @@ def page_product_image(
         if (
             product_number
             and
-            product_number.lstrip(
-                '0'
-            )
+            product_number.lstrip('0')
             in
             descriptor
         ):
@@ -3160,22 +2657,17 @@ def page_product_image(
                 )
             )
 
-    for (
-        _score,
-        image_url,
-    ) in sorted(
+    for _score, image_url in sorted(
         candidates,
         reverse=True,
     ):
 
         try:
 
-            path = (
-                download_image_to_temp(
-                    image_url,
-                    prefix=
-                        f'spc_{kind}_',
-                )
+            path = download_image_to_temp(
+                image_url,
+                prefix=
+                    f'spc_{kind}_',
             )
 
             with Image.open(
@@ -3183,20 +2675,14 @@ def page_product_image(
             ) as image:
 
                 if (
-                    image.width
-                    >=
-                    400
+                    image.width >= 400
                     and
-                    image.height
-                    >=
-                    250
+                    image.height >= 250
                 ):
 
                     return path
 
-            os.unlink(
-                path
-            )
+            os.unlink(path)
 
         except Exception:
             continue
@@ -3225,9 +2711,7 @@ def lonlat_to_web_mercator(
     return (
         radius
         *
-        math.radians(
-            lon
-        ),
+        math.radians(lon),
 
         radius
         *
@@ -3237,9 +2721,7 @@ def lonlat_to_web_mercator(
                 /
                 4
                 +
-                math.radians(
-                    lat
-                )
+                math.radians(lat)
                 /
                 2
             )
@@ -3259,18 +2741,14 @@ def mercator_bbox_from_lonlat(
     float,
 ]:
 
-    minx, miny = (
-        lonlat_to_web_mercator(
-            west,
-            south,
-        )
+    minx, miny = lonlat_to_web_mercator(
+        west,
+        south,
     )
 
-    maxx, maxy = (
-        lonlat_to_web_mercator(
-            east,
-            north,
-        )
+    maxx, maxy = lonlat_to_web_mercator(
+        east,
+        north,
     )
 
     return (
@@ -3377,10 +2855,8 @@ def build_service_map(
     width = 1200
     height = 760
 
-    bbox = (
-        mercator_bbox_from_lonlat(
-            *bbox_lonlat
-        )
+    bbox = mercator_bbox_from_lonlat(
+        *bbox_lonlat
     )
 
     product = export_map_image(
@@ -3421,12 +2897,10 @@ def build_service_map(
         refs
     )
 
-    tmp = (
-        tempfile.NamedTemporaryFile(
-            prefix=prefix,
-            suffix='.jpg',
-            delete=False,
-        )
+    tmp = tempfile.NamedTemporaryFile(
+        prefix=prefix,
+        suffix='.jpg',
+        delete=False,
     )
 
     tmp.close()
@@ -3471,11 +2945,9 @@ def warning_rings(
 
         return []
 
-    coords = (
-        geometry[
-            'coordinates'
-        ]
-    )
+    coords = geometry[
+        'coordinates'
+    ]
 
     if (
         geometry.get(
@@ -3596,21 +3068,10 @@ def map_bbox_for_rings(
         in points
     ]
 
-    minx = min(
-        xs
-    )
-
-    maxx = max(
-        xs
-    )
-
-    miny = min(
-        ys
-    )
-
-    maxy = max(
-        ys
-    )
+    minx = min(xs)
+    maxx = max(xs)
+    miny = min(ys)
+    maxy = max(ys)
 
     cx = (
         minx
@@ -3714,12 +3175,7 @@ def map_ring_to_pixels(
     ]
 ]:
 
-    (
-        minx,
-        miny,
-        maxx,
-        maxy,
-    ) = bbox
+    minx, miny, maxx, maxy = bbox
 
     out: list[
         tuple[
@@ -3748,15 +3204,13 @@ def map_ring_to_pixels(
 
             continue
 
-        mx, my = (
-            lonlat_to_web_mercator(
-                float(
-                    coordinate[0]
-                ),
-                float(
-                    coordinate[1]
-                ),
-            )
+        mx, my = lonlat_to_web_mercator(
+            float(
+                coordinate[0]
+            ),
+            float(
+                coordinate[1]
+            ),
         )
 
         px = int(
@@ -3923,28 +3377,18 @@ def build_alert_polygon_image(
 
     if radar:
 
-        alpha = refs.getchannel(
-            'A'
-        )
+        alpha = refs.getchannel('A')
 
         refs = (
             ImageOps.invert(
-                refs.convert(
-                    'RGB'
-                )
+                refs.convert('RGB')
             )
-            .convert(
-                'RGBA'
-            )
+            .convert('RGBA')
         )
 
-        refs.putalpha(
-            alpha
-        )
+        refs.putalpha(alpha)
 
-    base.alpha_composite(
-        refs
-    )
+    base.alpha_composite(refs)
 
     draw = ImageDraw.Draw(
         base,
@@ -3960,10 +3404,7 @@ def build_alert_polygon_image(
             map_h,
         )
 
-        if len(
-            points
-        ) < 3:
-
+        if len(points) < 3:
             continue
 
         fill = (
@@ -4056,18 +3497,14 @@ def build_alert_polygon_image(
         ),
     )
 
-    draw = ImageDraw.Draw(
-        canvas
-    )
+    draw = ImageDraw.Draw(canvas)
 
     draw.text(
         (
             30,
             27,
         ),
-        remove_emojis(
-            title
-        ),
+        remove_emojis(title),
         font=
             load_font(
                 44,
@@ -4165,9 +3602,7 @@ def child_text(
     local_name: str,
 ) -> str:
 
-    for child in list(
-        node
-    ):
+    for child in list(node):
 
         if (
             child.tag
@@ -4305,22 +3740,15 @@ def process_rss_source(
     accepted = [
         item
         for item
-        in fetch_rss(
-            url
-        )
+        in fetch_rss(url)
         if (
-            item_filter
-            is None
+            item_filter is None
             or
-            item_filter(
-                item
-            )
+            item_filter(item)
         )
     ]
 
-    if not db.source_primed(
-        source
-    ):
+    if not db.source_primed(source):
 
         for item in accepted:
 
@@ -4329,17 +3757,12 @@ def process_rss_source(
                 item.key,
             )
 
-        db.mark_source_primed(
-            source
-        )
+        db.mark_source_primed(source)
 
         log.info(
-            'Primed %s with %d '
-            'existing RSS item(s)',
+            'Primed %s with %d existing RSS item(s)',
             source,
-            len(
-                accepted
-            ),
+            len(accepted),
         )
 
         return
@@ -4369,9 +3792,7 @@ def process_rss_source(
 
             try:
 
-                post = renderer(
-                    item
-                )
+                post = renderer(item)
 
             except RetryableSourceDataError as exc:
 
@@ -4389,8 +3810,7 @@ def process_rss_source(
                 db.mark_seen_without_post(
                     source,
                     item.key,
-                    status=
-                        'ignored',
+                    status='ignored',
                 )
 
                 continue
@@ -4405,9 +3825,7 @@ def process_rss_source(
 
         finally:
 
-            cleanup_post(
-                post
-            )
+            cleanup_post(post)
 
 
 class RetryableSourceDataError(
@@ -4512,9 +3930,7 @@ def arcgis_query_features(
     out_fields: str = '*',
     return_geometry: bool = False,
     order_by: str = '',
-    out_sr: Optional[
-        int
-    ] = None,
+    out_sr: Optional[int] = None,
 ) -> list[
     dict[
         str,
@@ -4535,8 +3951,7 @@ def arcgis_query_features(
         'returnGeometry':
             (
                 'true'
-                if
-                return_geometry
+                if return_geometry
                 else
                 'false'
             ),
@@ -4555,9 +3970,7 @@ def arcgis_query_features(
 
         params[
             'outSR'
-        ] = str(
-            out_sr
-        )
+        ] = str(out_sr)
 
     features: list[
         dict[
@@ -4570,9 +3983,7 @@ def arcgis_query_features(
 
     while True:
 
-        page_params = dict(
-            params
-        )
+        page_params = dict(params)
 
         page_params[
             'resultOffset'
@@ -4583,8 +3994,7 @@ def arcgis_query_features(
         ] = 2000
 
         response = http_get(
-            f'{mapserver}/'
-            f'{layer}/query',
+            f'{mapserver}/{layer}/query',
             params=page_params,
             headers={
                 'Accept':
@@ -4598,9 +4008,7 @@ def arcgis_query_features(
 
         payload = response.json()
 
-        if payload.get(
-            'error'
-        ):
+        if payload.get('error'):
 
             raise RuntimeError(
                 'ArcGIS query error '
@@ -4608,21 +4016,14 @@ def arcgis_query_features(
                 f'{payload["error"]!r}'
             )
 
-        page = (
-            payload.get(
-                'features'
-            )
-            or
-            []
-        )
+        page = payload.get(
+            'features'
+        ) or []
 
-        features.extend(
-            page
-        )
+        features.extend(page)
 
         if (
-            not
-            payload.get(
+            not payload.get(
                 'exceededTransferLimit'
             )
             or
@@ -4631,9 +4032,7 @@ def arcgis_query_features(
 
             break
 
-        offset += len(
-            page
-        )
+        offset += len(page)
 
     return features
 
@@ -4673,9 +4072,7 @@ def clean_spc_location(
     value: str,
 ) -> str:
 
-    cleaned = squish(
-        value
-    )
+    cleaned = squish(value)
 
     cleaned = re.sub(
         r'^(?:portions|parts) of\s+',
@@ -4708,11 +4105,8 @@ def spc_item_is_real(
     ).lower()
 
     if any(
-        marker
-        in
-        combined
-        for marker
-        in (
+        marker in combined
+        for marker in (
             'no mesoscale discussions',
             'no watches are',
             'no watches in effect',
@@ -4730,15 +4124,12 @@ def spc_item_is_real(
             'status report'
             not in combined
             and
-            'watch'
-            in combined
+            'watch' in combined
             and
             (
-                'tornado'
-                in combined
+                'tornado' in combined
                 or
-                'severe thunderstorm'
-                in combined
+                'severe thunderstorm' in combined
             )
         )
 
@@ -4797,9 +4188,7 @@ def spc_field(
 
     return (
         squish(
-            match.group(
-                1
-            )
+            match.group(1)
         )
         if match
         else
@@ -4837,18 +4226,14 @@ def spc_product_name(
             return (
                 f'{match.group(1).title()} '
                 f'{int(match.group(2))}',
-                match.group(
-                    2
-                ),
+                match.group(2),
             )
 
         return (
             (
                 'Tornado Watch'
                 if
-                'tornado'
-                in
-                combined.lower()
+                'tornado' in combined.lower()
                 else
                 'Severe Thunderstorm Watch'
             ),
@@ -4870,9 +4255,7 @@ def spc_product_name(
             return (
                 f'Mesoscale Discussion '
                 f'{int(match.group(1))}',
-                match.group(
-                    1
-                ),
+                match.group(1),
             )
 
         return (
@@ -4958,9 +4341,7 @@ def spc_location(
         if match:
 
             return clean_spc_location(
-                match.group(
-                    1
-                )
+                match.group(1)
             )
 
     if kind == 'convective':
@@ -4981,9 +4362,7 @@ def spc_location(
         if match:
 
             return clean_spc_location(
-                match.group(
-                    1
-                )
+                match.group(1)
             )
 
     if kind == 'fire':
@@ -5002,9 +4381,7 @@ def spc_location(
         if match:
 
             return clean_spc_location(
-                match.group(
-                    1
-                )
+                match.group(1)
             )
 
     return 'United States'
@@ -5024,48 +4401,26 @@ def find_local_issue_clock(
     )
 
     if not match:
-
         return ''
 
-    digits, ampm, zone = (
-        match.groups()
-    )
+    digits, ampm, zone = match.groups()
 
-    digits = (
-        digits.strip()
-    )
+    digits = digits.strip()
 
-    if len(
-        digits
-    ) <= 2:
+    if len(digits) <= 2:
 
-        hour = int(
-            digits
-        )
-
+        hour = int(digits)
         minute = 0
 
-    elif len(
-        digits
-    ) == 3:
+    elif len(digits) == 3:
 
-        hour = int(
-            digits[0]
-        )
-
-        minute = int(
-            digits[1:]
-        )
+        hour = int(digits[0])
+        minute = int(digits[1:])
 
     else:
 
-        hour = int(
-            digits[:-2]
-        )
-
-        minute = int(
-            digits[-2:]
-        )
+        hour = int(digits[:-2])
+        minute = int(digits[-2:])
 
     return (
         f'{hour}:'
@@ -5093,10 +4448,7 @@ def find_spc_expiry_text(
     )
 
     if match:
-
-        return match.group(
-            1
-        )
+        return match.group(1)
 
     valid = re.search(
         r'\bValid\s+'
@@ -5107,10 +4459,7 @@ def find_spc_expiry_text(
     )
 
     if valid:
-
-        return (
-            f'{valid.group(1)}Z'
-        )
+        return f'{valid.group(1)}Z'
 
     return ''
 
@@ -5134,9 +4483,7 @@ def spc_day_number(
         )
 
     return int(
-        match.group(
-            1
-        )
+        match.group(1)
     )
 
 
@@ -5153,22 +4500,15 @@ def spc_percent_string(
     )
 
     if not text:
-
         return ''
 
     if '%' in text:
-
         return text
 
-    digits = digits_only(
-        text
-    )
+    digits = digits_only(text)
 
     if digits:
-
-        return (
-            f'{int(digits)}%'
-        )
+        return f'{int(digits)}%'
 
     return text
 
@@ -5203,28 +4543,18 @@ def spc_max_label(
 
         label = first_nonempty(
             [
-                attrs.get(
-                    'label2'
-                ),
-                attrs.get(
-                    'label'
-                ),
+                attrs.get('label2'),
+                attrs.get('label'),
             ]
         )
 
-        dn_value = (
-            attrs.get(
-                'dn'
-            )
-        )
+        dn_value = attrs.get('dn')
 
         if categorical:
 
             try:
 
-                score = int(
-                    dn_value
-                )
+                score = int(dn_value)
 
             except Exception:
 
@@ -5233,11 +4563,8 @@ def spc_max_label(
                 )
 
                 score = (
-                    int(
-                        label_digits
-                    )
-                    if
-                    label_digits
+                    int(label_digits)
+                    if label_digits
                     else
                     0
                 )
@@ -5254,13 +4581,9 @@ def spc_max_label(
             continue
 
         score_text = (
-            spc_percent_string(
-                label
-            )
+            spc_percent_string(label)
             or
-            spc_percent_string(
-                dn_value
-            )
+            spc_percent_string(dn_value)
         )
 
         digits = digits_only(
@@ -5271,15 +4594,12 @@ def spc_max_label(
 
             ranked.append(
                 (
-                    int(
-                        digits
-                    ),
+                    int(digits),
                     f'{int(digits)}%',
                 )
             )
 
     if not ranked:
-
         return ''
 
     ranked.sort(
@@ -5287,9 +4607,7 @@ def spc_max_label(
             item[0]
     )
 
-    return (
-        ranked[-1][1]
-    )
+    return ranked[-1][1]
 
 
 def default_spc_map_extent_for_day(
@@ -5390,11 +4708,9 @@ def mapbox_camera_for_mercator_bbox(
         maxy
     ) / 2.0
 
-    lon, lat = (
-        web_mercator_to_lonlat(
-            center_x,
-            center_y,
-        )
+    lon, lat = web_mercator_to_lonlat(
+        center_x,
+        center_y,
     )
 
     world_m = (
@@ -5410,9 +4726,7 @@ def mapbox_camera_for_mercator_bbox(
     zoom_x = math.log2(
         max(
             1.0,
-            float(
-                width
-            )
+            float(width)
             *
             world_m
             /
@@ -5427,9 +4741,7 @@ def mapbox_camera_for_mercator_bbox(
     zoom_y = math.log2(
         max(
             1.0,
-            float(
-                height
-            )
+            float(height)
             *
             world_m
             /
@@ -5493,32 +4805,21 @@ def fetch_mapbox_light_base(
             ),
         )
 
-    lon, lat, zoom = (
-        mapbox_camera_for_mercator_bbox(
-            bbox,
-            width,
-            height,
-        )
+    lon, lat, zoom = mapbox_camera_for_mercator_bbox(
+        bbox,
+        width,
+        height,
     )
 
-    style = (
-        MAPBOX_STYLE
-        .strip(
-            '/'
-        )
-    )
+    style = MAPBOX_STYLE.strip('/')
 
     if '/' not in style:
 
-        style = (
-            'mapbox/light-v11'
-        )
+        style = 'mapbox/light-v11'
 
-    owner, style_id = (
-        style.split(
-            '/',
-            1,
-        )
+    owner, style_id = style.split(
+        '/',
+        1,
     )
 
     url = (
@@ -5529,8 +4830,7 @@ def fetch_mapbox_light_base(
         'static/'
         f'{lon:.6f},'
         f'{lat:.6f},'
-        f'{zoom:.3f},'
-        '0/'
+        f'{zoom:.3f},0/'
         f'{width}x{height}'
     )
 
@@ -5565,9 +4865,7 @@ def fetch_mapbox_light_base(
                     response.content
                 )
             )
-            .convert(
-                'RGBA'
-            )
+            .convert('RGBA')
         )
 
     except Exception as exc:
@@ -5608,28 +4906,21 @@ def scale_overlay_alpha(
 
     image = (
         image.copy()
-        .convert(
-            'RGBA'
-        )
+        .convert('RGBA')
     )
 
-    alpha = (
-        image.getchannel(
-            'A'
-        )
-        .point(
-            lambda value:
-                int(
-                    value
-                    *
-                    factor
-                )
-        )
+    alpha = image.getchannel(
+        'A'
+    ).point(
+        lambda value:
+            int(
+                value
+                *
+                factor
+            )
     )
 
-    image.putalpha(
-        alpha
-    )
+    image.putalpha(alpha)
 
     return image
 
@@ -5647,36 +4938,28 @@ def add_reference_boundaries(
     states: bool = True,
 ) -> Image.Image:
 
-    width, height = (
-        base.size
-    )
+    width, height = base.size
 
     out = (
         base.copy()
-        .convert(
-            'RGBA'
-        )
+        .convert('RGBA')
     )
 
     if counties:
 
         try:
 
-            county_layer = (
-                export_map_image(
-                    REFERENCE_EXPORT_URL,
-                    bbox,
-                    width,
-                    height,
-                    layers='show:2',
-                )
+            county_layer = export_map_image(
+                REFERENCE_EXPORT_URL,
+                bbox,
+                width,
+                height,
+                layers='show:2',
             )
 
-            county_layer = (
-                scale_overlay_alpha(
-                    county_layer,
-                    0.34,
-                )
+            county_layer = scale_overlay_alpha(
+                county_layer,
+                0.34,
             )
 
             out.alpha_composite(
@@ -5694,21 +4977,17 @@ def add_reference_boundaries(
 
         try:
 
-            state_layer = (
-                export_map_image(
-                    REFERENCE_EXPORT_URL,
-                    bbox,
-                    width,
-                    height,
-                    layers='show:3',
-                )
+            state_layer = export_map_image(
+                REFERENCE_EXPORT_URL,
+                bbox,
+                width,
+                height,
+                layers='show:3',
             )
 
-            state_layer = (
-                scale_overlay_alpha(
-                    state_layer,
-                    0.95,
-                )
+            state_layer = scale_overlay_alpha(
+                state_layer,
+                0.95,
             )
 
             out.alpha_composite(
@@ -5841,9 +5120,7 @@ def arcgis_geometry_rings_mercator(
                     )
                 )
 
-        if len(
-            converted
-        ) >= 3:
+        if len(converted) >= 3:
 
             rings_out.append(
                 converted
@@ -5919,21 +5196,10 @@ def mercator_bbox_from_points(
         in points
     ]
 
-    minx = min(
-        xs
-    )
-
-    maxx = max(
-        xs
-    )
-
-    miny = min(
-        ys
-    )
-
-    maxy = max(
-        ys
-    )
+    minx = min(xs)
+    maxx = max(xs)
+    miny = min(ys)
+    maxy = max(ys)
 
     cx = (
         minx
@@ -6136,9 +5402,7 @@ def draw_red_outline_geometry(
 
     out = (
         base.copy()
-        .convert(
-            'RGBA'
-        )
+        .convert('RGBA')
     )
 
     draw = ImageDraw.Draw(
@@ -6146,16 +5410,12 @@ def draw_red_outline_geometry(
         'RGBA',
     )
 
-    width, height = (
-        out.size
-    )
+    width, height = out.size
 
-    rings = (
-        arcgis_geometry_rings_mercator(
-            geometry,
-            default_wkid=
-                default_wkid,
-        )
+    rings = arcgis_geometry_rings_mercator(
+        geometry,
+        default_wkid=
+            default_wkid,
     )
 
     if not rings:
@@ -6167,19 +5427,14 @@ def draw_red_outline_geometry(
 
     for ring in rings:
 
-        pixels = (
-            mercator_ring_to_pixels(
-                ring,
-                bbox,
-                width,
-                height,
-            )
+        pixels = mercator_ring_to_pixels(
+            ring,
+            bbox,
+            width,
+            height,
         )
 
-        if len(
-            pixels
-        ) < 3:
-
+        if len(pixels) < 3:
             continue
 
         closed = (
@@ -6227,12 +5482,10 @@ def save_map_image(
     prefix: str,
 ) -> str:
 
-    tmp = (
-        tempfile.NamedTemporaryFile(
-            prefix=prefix,
-            suffix='.jpg',
-            delete=False,
-        )
+    tmp = tempfile.NamedTemporaryFile(
+        prefix=prefix,
+        suffix='.jpg',
+        delete=False,
     )
 
     tmp.close()
@@ -6267,12 +5520,10 @@ def build_mapbox_product_outline_map(
     width = 1200
     height = 760
 
-    points = (
-        mercator_points_from_arcgis_geometry(
-            geometry,
-            default_wkid=
-                default_wkid,
-        )
+    points = mercator_points_from_arcgis_geometry(
+        geometry,
+        default_wkid=
+            default_wkid,
     )
 
     bbox = mercator_bbox_from_points(
@@ -6353,8 +5604,7 @@ def build_mapbox_spc_outlook_map(
             all_points.extend(
                 mercator_points_from_arcgis_geometry(
                     geometry,
-                    default_wkid=
-                        3857,
+                    default_wkid=3857,
                 )
             )
 
@@ -6405,8 +5655,7 @@ def build_mapbox_spc_outlook_map(
     )
 
     product = export_map_image(
-        f'{SPC_OUTLOOK_MAPSERVER}/'
-        'export',
+        f'{SPC_OUTLOOK_MAPSERVER}/export',
         bbox,
         width,
         height,
@@ -6449,13 +5698,11 @@ def find_matching_mcd_feature(
         return_geometry=True,
     )
 
-    target = digits_only(
-    number
-).lstrip("0")
+    target = digits_only(number)
 
-candidates: list[
-    SPCGeometryMatch
-] = []
+    candidates: list[
+        SPCGeometryMatch
+    ] = []
 
     for feature in features:
 
@@ -6467,11 +5714,9 @@ candidates: list[
             {}
         )
 
-        feature_number = (
-            digits_only(
-                attrs.get(
-                    'name'
-                )
+        feature_number = digits_only(
+            attrs.get(
+                'name'
             )
         )
 
@@ -6511,25 +5756,18 @@ candidates: list[
             {}
         )
 
-        if not geometry.get(
-            'rings'
-        ):
+        if not geometry.get('rings'):
 
             continue
 
         candidates.append(
             SPCGeometryMatch(
-                dict(
-                    attrs
-                ),
-                dict(
-                    geometry
-                ),
+                dict(attrs),
+                dict(geometry),
             )
         )
 
     if not candidates:
-
         return None
 
     candidates.sort(
@@ -6587,9 +5825,11 @@ def find_matching_watch_feature(
         return_geometry=True,
     )
 
+    # NOAA commonly stores watch event numbers with leading zeroes.
+    # Normalize both sides so RSS "628" matches GIS "0628".
     target = digits_only(
         number
-    )
+    ).lstrip('0')
 
     candidates: list[
         SPCGeometryMatch
@@ -6625,7 +5865,7 @@ def find_matching_watch_feature(
             attrs.get(
                 'event'
             )
-        )
+        ).lstrip('0')
 
         if (
             target
@@ -6653,12 +5893,8 @@ def find_matching_watch_feature(
 
         candidates.append(
             SPCGeometryMatch(
-                dict(
-                    attrs
-                ),
-                dict(
-                    geometry
-                ),
+                dict(attrs),
+                dict(geometry),
             )
         )
 
@@ -6720,10 +5956,8 @@ def load_convective_snapshot(
     day: int,
 ) -> SPCConvectiveSnapshot:
 
-    layer_ids = (
-        SPC_OUTLOOK_LAYER_IDS.get(
-            day
-        )
+    layer_ids = SPC_OUTLOOK_LAYER_IDS.get(
+        day
     )
 
     if not layer_ids:
@@ -6750,19 +5984,17 @@ def load_convective_snapshot(
             'usable GIS layer mapping'
         )
 
-    category_features = (
-        arcgis_query_features(
-            SPC_OUTLOOK_MAPSERVER,
-            primary_layer,
-            out_fields=(
-                'objectid,dn,valid,expire,'
-                'idp_source,idp_filedate,'
-                'idp_ingestdate,issue,'
-                'label,label2,stroke,fill'
-            ),
-            return_geometry=True,
-            out_sr=3857,
-        )
+    category_features = arcgis_query_features(
+        SPC_OUTLOOK_MAPSERVER,
+        primary_layer,
+        out_fields=(
+            'objectid,dn,valid,expire,'
+            'idp_source,idp_filedate,'
+            'idp_ingestdate,issue,'
+            'label,label2,stroke,fill'
+        ),
+        return_geometry=True,
+        out_sr=3857,
     )
 
     if not category_features:
@@ -6917,12 +6149,10 @@ def load_convective_snapshot(
         )
     )
 
-    image_path = (
-        build_mapbox_spc_outlook_map(
-            day,
-            image_layer,
-            category_features,
-        )
+    image_path = build_mapbox_spc_outlook_map(
+        day,
+        image_layer,
+        category_features,
     )
 
     if not image_path:
@@ -6935,20 +6165,13 @@ def load_convective_snapshot(
     return SPCConvectiveSnapshot(
         day=day,
         category=category,
-        tornado_risk=
-            tornado_risk,
-        wind_risk=
-            wind_risk,
-        hail_risk=
-            hail_risk,
-        severe_risk=
-            severe_risk,
-        image_path=
-            image_path,
-        issued=
-            issued,
-        valid=
-            valid,
+        tornado_risk=tornado_risk,
+        wind_risk=wind_risk,
+        hail_risk=hail_risk,
+        severe_risk=severe_risk,
+        image_path=image_path,
+        issued=issued,
+        valid=valid,
     )
 
 
@@ -6959,16 +6182,12 @@ def render_spc(
     RenderedPost
 ]:
 
-    product_name, number = (
-        spc_product_name(
-            item,
-            kind,
-        )
+    product_name, number = spc_product_name(
+        item,
+        kind,
     )
 
-    page_text = (
-        item.multiline_text
-    )
+    page_text = item.multiline_text
 
     soup: Optional[
         BeautifulSoup
@@ -6978,10 +6197,8 @@ def render_spc(
 
         try:
 
-            page_text, soup = (
-                fetch_product_page(
-                    item.link
-                )
+            page_text, soup = fetch_product_page(
+                item.link
             )
 
         except Exception:
@@ -7020,9 +6237,7 @@ def render_spc(
 
     elif issued:
 
-        time_line = (
-            f'Issued {issued}'
-        )
+        time_line = f'Issued {issued}'
 
     elif item.published:
 
@@ -7043,15 +6258,11 @@ def render_spc(
             item
         )
 
-        snapshot = (
-            load_convective_snapshot(
-                day
-            )
+        snapshot = load_convective_snapshot(
+            day
         )
 
-        image_path = (
-            snapshot.image_path
-        )
+        image_path = snapshot.image_path
 
         if snapshot.category:
 
@@ -7098,18 +6309,16 @@ def render_spc(
                 ]
             )
 
-            probability_risk = (
-                spc_max_label(
-                    arcgis_query_features(
-                        SPC_OUTLOOK_MAPSERVER,
-                        probability_layer,
-                        out_fields=(
-                            'objectid,dn,label,'
-                            'label2,issue,valid,'
-                            'idp_ingestdate'
-                        ),
-                        return_geometry=False,
-                    )
+            probability_risk = spc_max_label(
+                arcgis_query_features(
+                    SPC_OUTLOOK_MAPSERVER,
+                    probability_layer,
+                    out_fields=(
+                        'objectid,dn,label,'
+                        'label2,issue,valid,'
+                        'idp_ingestdate'
+                    ),
+                    return_geometry=False,
                 )
             )
 
@@ -7157,7 +6366,7 @@ def render_spc(
         if probability:
 
             details.append(
-                f'Watch probability: '
+                'Watch probability: '
                 f'{probability.group(1)}%'
             )
 
@@ -7188,11 +6397,9 @@ def render_spc(
 
     elif kind == 'watch':
 
-        match = (
-            find_matching_watch_feature(
-                product_name,
-                number,
-            )
+        match = find_matching_watch_feature(
+            product_name,
+            number,
         )
 
         if not match:
@@ -7217,21 +6424,18 @@ def render_spc(
             )
 
     elif (
-        soup
-        is not None
+        soup is not None
         and
         item.link
     ):
 
         try:
 
-            image_path = (
-                page_product_image(
-                    item.link,
-                    soup,
-                    kind,
-                    number,
-                )
+            image_path = page_product_image(
+                item.link,
+                soup,
+                kind,
+                number,
             )
 
         except Exception:
@@ -7258,9 +6462,7 @@ def render_spc(
         details.append(
             'Hazards: '
             +
-            ', '.join(
-                hazards
-            )
+            ', '.join(hazards)
         )
 
     return RenderedPost(
@@ -7327,11 +6529,9 @@ def build_nhc_basin_sources(
     ]
 ]:
 
-    code = (
-        NHC_BASIN_CODES[
-            basin
-        ]
-    )
+    code = NHC_BASIN_CODES[
+        basin
+    ]
 
     out: list[
         tuple[
@@ -7349,36 +6549,20 @@ def build_nhc_basin_sources(
 
         out.append(
             (
-                f'nhc_tcp_'
-                f'{basin}_'
-                f'{wallet}',
-
-                'https://'
-                'www.nhc.noaa.gov/'
-                f'xml/TCP'
-                f'{code}'
-                f'{wallet}.xml',
-
+                f'nhc_tcp_{basin}_{wallet}',
+                f'https://www.nhc.noaa.gov/'
+                f'xml/TCP{code}{wallet}.xml',
                 'tcp',
-
                 basin,
             )
         )
 
         out.append(
             (
-                f'nhc_tcu_'
-                f'{basin}_'
-                f'{wallet}',
-
-                'https://'
-                'www.nhc.noaa.gov/'
-                f'xml/TCU'
-                f'{code}'
-                f'{wallet}.xml',
-
+                f'nhc_tcu_{basin}_{wallet}',
+                f'https://www.nhc.noaa.gov/'
+                f'xml/TCU{code}{wallet}.xml',
                 'tcu',
-
                 basin,
             )
         )
@@ -7387,18 +6571,10 @@ def build_nhc_basin_sources(
 
             out.append(
                 (
-                    f'nhc_tcd_'
-                    f'{basin}_'
-                    f'{wallet}',
-
-                    'https://'
-                    'www.nhc.noaa.gov/'
-                    f'xml/TCD'
-                    f'{code}'
-                    f'{wallet}.xml',
-
+                    f'nhc_tcd_{basin}_{wallet}',
+                    f'https://www.nhc.noaa.gov/'
+                    f'xml/TCD{code}{wallet}.xml',
                     'tcd',
-
                     basin,
                 )
             )
@@ -7407,18 +6583,10 @@ def build_nhc_basin_sources(
 
             out.append(
                 (
-                    f'nhc_tcm_'
-                    f'{basin}_'
-                    f'{wallet}',
-
-                    'https://'
-                    'www.nhc.noaa.gov/'
-                    f'xml/TCM'
-                    f'{code}'
-                    f'{wallet}.xml',
-
+                    f'nhc_tcm_{basin}_{wallet}',
+                    f'https://www.nhc.noaa.gov/'
+                    f'xml/TCM{code}{wallet}.xml',
                     'tcm',
-
                     basin,
                 )
             )
@@ -7454,11 +6622,8 @@ def nhc_item_is_real(
         return True
 
     return not any(
-        marker
-        in
-        combined
-        for marker
-        in (
+        marker in combined
+        for marker in (
             'no tropical cyclones',
             'there are no tropical cyclones',
             'no active tropical cyclones',
@@ -7486,9 +6651,7 @@ def find_nhc_field(
 
     return (
         squish(
-            match.group(
-                1
-            )
+            match.group(1)
         )
         if match
         else
@@ -7523,9 +6686,7 @@ def nhc_center_location(
 
     return (
         squish(
-            match.group(
-                1
-            )
+            match.group(1)
         )
         if match
         else
@@ -7538,15 +6699,12 @@ def nhc_page_image(
 ) -> str:
 
     if not page_url:
-
         return ''
 
     try:
 
-        _text, soup = (
-            fetch_product_page(
-                page_url
-            )
+        _text, soup = fetch_product_page(
+            page_url
         )
 
     except Exception:
@@ -7573,7 +6731,6 @@ def nhc_page_image(
         ).strip()
 
         if not src:
-
             continue
 
         descriptor = ' '.join(
@@ -7597,11 +6754,8 @@ def nhc_page_image(
         ).lower()
 
         if any(
-            bad
-            in
-            descriptor
-            for bad
-            in (
+            bad in descriptor
+            for bad in (
                 'logo',
                 'banner',
                 'social',
@@ -7649,25 +6803,17 @@ def nhc_page_image(
                 prefix='nhc_storm_',
             )
 
-            with Image.open(
-                path
-            ) as image:
+            with Image.open(path) as image:
 
                 if (
-                    image.width
-                    >=
-                    400
+                    image.width >= 400
                     and
-                    image.height
-                    >=
-                    250
+                    image.height >= 250
                 ):
 
                     return path
 
-            os.unlink(
-                path
-            )
+            os.unlink(path)
 
         except Exception:
             continue
@@ -7683,33 +6829,23 @@ def render_nhc_two(
     basin = (
         'Atlantic Basin'
         if
-        source.endswith(
-            'atlantic'
-        )
+        source.endswith('atlantic')
         else
         'Eastern Pacific'
         if
-        source.endswith(
-            'epac'
-        )
+        source.endswith('epac')
         else
         'Central Pacific'
     )
 
-    raw = (
-        item.multiline_text
-    )
+    raw = item.multiline_text
 
-    issued = (
-        find_local_issue_clock(
-            raw
-        )
+    issued = find_local_issue_clock(
+        raw
     )
 
     probabilities_48 = [
-        int(
-            value
-        )
+        int(value)
         for value
         in re.findall(
             r'Formation chance through '
@@ -7721,9 +6857,7 @@ def render_nhc_two(
     ]
 
     probabilities_7 = [
-        int(
-            value
-        )
+        int(value)
         for value
         in re.findall(
             r'Formation chance through '
@@ -7754,22 +6888,18 @@ def render_nhc_two(
 
     image_path = ''
 
-    image_url = (
-        NHC_TWO_IMAGES.get(
-            source,
-            '',
-        )
+    image_url = NHC_TWO_IMAGES.get(
+        source,
+        '',
     )
 
     if image_url:
 
         try:
 
-            image_path = (
-                download_image_to_temp(
-                    image_url,
-                    prefix='nhc_two_',
-                )
+            image_path = download_image_to_temp(
+                image_url,
+                prefix='nhc_two_',
             )
 
         except Exception:
@@ -7816,9 +6946,7 @@ def render_nhc_storm(
     basin: str,
 ) -> RenderedPost:
 
-    raw = (
-        item.multiline_text
-    )
+    raw = item.multiline_text
 
     names = {
         'tcp':
@@ -7840,19 +6968,15 @@ def render_nhc_storm(
     )
 
     location = (
-        nhc_center_location(
-            raw
-        )
+        nhc_center_location(raw)
         or
         NHC_BASIN_LABELS[
             basin
         ]
     )
 
-    issued = (
-        find_local_issue_clock(
-            raw
-        )
+    issued = find_local_issue_clock(
+        raw
     )
 
     details: list[str] = []
@@ -7897,9 +7021,7 @@ def render_nhc_storm(
     if (
         pressure
         and
-        len(
-            details
-        ) < 2
+        len(details) < 2
     ):
 
         details.append(
@@ -7915,10 +7037,8 @@ def render_nhc_storm(
 
     try:
 
-        image_path = (
-            nhc_page_image(
-                item.link
-            )
+        image_path = nhc_page_image(
+            item.link
         )
 
     except Exception:
@@ -8032,11 +7152,14 @@ def nhc_sweep_basin(
 
     okay = True
 
-    for source, url, kind, source_basin in (
-        NHC_BASIN_SOURCES[
-            basin
-        ]
-    ):
+    for (
+        source,
+        url,
+        kind,
+        source_basin,
+    ) in NHC_BASIN_SOURCES[
+        basin
+    ]:
 
         try:
 
@@ -8098,9 +7221,7 @@ def poll_nhc(
         time.time()
     )
 
-    for basin, index_url in (
-        NHC_BASIN_INDEX_FEEDS.items()
-    ):
+    for basin, index_url in NHC_BASIN_INDEX_FEEDS.items():
 
         fp_key = (
             f'nhc:index-fingerprint:'
@@ -8114,16 +7235,12 @@ def poll_nhc(
 
         try:
 
-            fingerprint = (
-                nhc_index_fingerprint(
-                    index_url
-                )
+            fingerprint = nhc_index_fingerprint(
+                index_url
             )
 
-            old_fingerprint = (
-                db.get_meta(
-                    fp_key
-                )
+            old_fingerprint = db.get_meta(
+                fp_key
             )
 
             try:
@@ -8142,8 +7259,7 @@ def poll_nhc(
                 last_sweep = 0
 
             changed = (
-                not
-                old_fingerprint
+                not old_fingerprint
                 or
                 fingerprint
                 !=
@@ -8184,9 +7300,7 @@ def poll_nhc(
 
                     db.set_meta(
                         sweep_key,
-                        str(
-                            now_ts
-                        ),
+                        str(now_ts),
                     )
 
                     db.set_meta(
@@ -8235,9 +7349,7 @@ def fetch_nws_alerts_since(
         ]
     ] = {
         'start':
-            iso_z(
-                start
-            ),
+            iso_z(start),
 
         'status':
             'actual',
@@ -8246,9 +7358,7 @@ def fetch_nws_alerts_since(
             500,
     }
 
-    url = (
-        NWS_ALERTS_URL
-    )
+    url = NWS_ALERTS_URL
 
     features: list[
         dict[
@@ -8262,9 +7372,7 @@ def fetch_nws_alerts_since(
     while (
         url
         and
-        pages
-        <
-        25
+        pages < 25
     ):
 
         response = http_get(
@@ -8321,17 +7429,13 @@ def fetch_nws_alerts_since(
         )
 
         url = (
-            str(
-                next_url
-            )
-            if
-            next_url
+            str(next_url)
+            if next_url
             else
             ''
         )
 
         params = None
-
         pages += 1
 
     return features
@@ -8376,10 +7480,8 @@ def is_new_alert_message(
     ],
 ) -> bool:
 
-    actions = (
-        alert_vtec_actions(
-            props
-        )
+    actions = alert_vtec_actions(
+        props
     )
 
     if actions:
@@ -8418,33 +7520,23 @@ def nws_alert_key(
     )
 
     raw = (
-        props.get(
-            'id'
-        )
+        props.get('id')
         or
-        feature.get(
-            'id'
-        )
+        feature.get('id')
         or
-        props.get(
-            '@id'
-        )
+        props.get('@id')
     )
 
     if raw:
 
         return sha256_text(
-            str(
-                raw
-            )
+            str(raw)
         )
 
     return sha256_text(
         '\x1f'.join(
             str(
-                props.get(
-                    key
-                )
+                props.get(key)
                 or
                 ''
             )
@@ -8465,7 +7557,6 @@ def format_cap_time(
 ) -> str:
 
     if not value:
-
         return ''
 
     try:
@@ -8488,9 +7579,7 @@ def format_cap_time(
     offset = (
         dt.utcoffset()
         or
-        timedelta(
-            0
-        )
+        timedelta(0)
     )
 
     hours = int(
@@ -8563,9 +7652,7 @@ def render_nws_alert(
         'tornado'
         else
         squish(
-            props.get(
-                'event'
-            )
+            props.get('event')
         )
         or
         'Winter Weather Alert'
@@ -8573,18 +7660,14 @@ def render_nws_alert(
 
     location = truncate(
         squish(
-            props.get(
-                'areaDesc'
-            )
+            props.get('areaDesc')
         ),
         110,
     )
 
     issued = format_cap_time(
         str(
-            props.get(
-                'sent'
-            )
+            props.get('sent')
             or
             ''
         )
@@ -8592,9 +7675,7 @@ def render_nws_alert(
 
     expires = format_cap_time(
         str(
-            props.get(
-                'expires'
-            )
+            props.get('expires')
             or
             ''
         )
@@ -8674,16 +7755,14 @@ def render_nws_alert(
 
     try:
 
-        image_path = (
-            build_alert_polygon_image(
-                feature,
-                product,
-                radar=(
-                    kind
-                    ==
-                    'tornado'
-                ),
-            )
+        image_path = build_alert_polygon_image(
+            feature,
+            product,
+            radar=(
+                kind
+                ==
+                'tornado'
+            ),
         )
 
     except Exception:
@@ -8721,13 +7800,9 @@ def poll_nws_alerts(
     x: XPublisher,
 ) -> None:
 
-    source = (
-        'nws_alerts'
-    )
+    source = 'nws_alerts'
 
-    now = (
-        utcnow()
-    )
+    now = utcnow()
 
     previous = parse_any_datetime(
         db.get_meta(
@@ -8802,11 +7877,7 @@ def poll_nws_alerts(
                 )
             )
 
-        elif (
-            event
-            in
-            WINTER_ALERT_EVENTS
-        ):
+        elif event in WINTER_ALERT_EVENTS:
 
             relevant.append(
                 (
@@ -8825,8 +7896,7 @@ def poll_nws_alerts(
                     )
                     or
                     {}
-                )
-                .get(
+                ).get(
                     'sent'
                 )
             )
@@ -8853,24 +7923,18 @@ def poll_nws_alerts(
                 ),
             )
 
-        db.mark_source_primed(
-            source
-        )
+        db.mark_source_primed(source)
 
         db.set_meta(
             'nws:last_success',
-            iso_z(
-                now
-            ),
+            iso_z(now),
         )
 
         log.info(
             'Primed %s with %d '
             'recent relevant alert(s)',
             source,
-            len(
-                relevant
-            ),
+            len(relevant),
         )
 
         return
@@ -8885,10 +7949,8 @@ def poll_nws_alerts(
             {}
         )
 
-        key = (
-            nws_alert_key(
-                feature
-            )
+        key = nws_alert_key(
+            feature
         )
 
         current_status = db.status(
@@ -8920,9 +7982,7 @@ def poll_nws_alerts(
             continue
 
         age = age_minutes(
-            props.get(
-                'sent'
-            )
+            props.get('sent')
         )
 
         max_age = (
@@ -8936,19 +7996,15 @@ def poll_nws_alerts(
         )
 
         if (
-            age
-            is not None
+            age is not None
             and
-            age
-            >
-            max_age
+            age > max_age
         ):
 
             db.mark_seen_without_post(
                 source,
                 key,
-                status=
-                    'stale',
+                status='stale',
             )
 
             continue
@@ -8974,15 +8030,11 @@ def poll_nws_alerts(
 
         finally:
 
-            cleanup_post(
-                post
-            )
+            cleanup_post(post)
 
     db.set_meta(
         'nws:last_success',
-        iso_z(
-            now
-        ),
+        iso_z(now),
     )
 
 
@@ -8998,8 +8050,7 @@ def arcgis_features(
 ]:
 
     response = http_get(
-        f'{mapserver}/'
-        f'{layer}/query',
+        f'{mapserver}/{layer}/query',
         params={
             'where':
                 '1=1',
@@ -9023,13 +8074,9 @@ def arcgis_features(
         ),
     )
 
-    payload = (
-        response.json()
-    )
+    payload = response.json()
 
-    if payload.get(
-        'error'
-    ):
+    if payload.get('error'):
 
         raise RuntimeError(
             'NOAA ArcGIS error '
@@ -9071,7 +8118,6 @@ def first_nonempty(
         )
 
         if text:
-
             return text
 
     return ''
@@ -9122,17 +8168,13 @@ def parse_wpc_ero(
         )
 
     issued = first_nonempty(
-        attribute.get(
-            'issue_time'
-        )
+        attribute.get('issue_time')
         for attribute
         in attrs
     )
 
     valid = first_nonempty(
-        attribute.get(
-            'valid_time'
-        )
+        attribute.get('valid_time')
         for attribute
         in attrs
     )
@@ -9150,6 +8192,7 @@ def parse_wpc_ero(
                     for attribute
                     in attrs
                 ),
+
                 first_nonempty(
                     attribute.get(
                         'end_time'
@@ -9180,9 +8223,7 @@ def parse_wpc_ero(
 
             issued = iso_z(
                 datetime.fromtimestamp(
-                    float(
-                        raw
-                    )
+                    float(raw)
                     /
                     1000.0,
                     tz=
@@ -9204,9 +8245,7 @@ def parse_wpc_ero(
 
         outlook = squish(
             str(
-                attribute.get(
-                    'outlook'
-                )
+                attribute.get('outlook')
                 or
                 ''
             )
@@ -9216,9 +8255,7 @@ def parse_wpc_ero(
 
             rank = int(
                 float(
-                    attribute.get(
-                        'dn'
-                    )
+                    attribute.get('dn')
                 )
             )
 
@@ -9237,19 +8274,10 @@ def parse_wpc_ero(
                 default=0,
             )
 
-        if (
-            rank
-            >
-            best_rank
-        ):
+        if rank > best_rank:
 
-            best_name = (
-                outlook
-            )
-
-            best_rank = (
-                rank
-            )
+            best_name = outlook
+            best_rank = rank
 
     return EROProduct(
         day,
@@ -9267,15 +8295,11 @@ def render_ero(
 
     try:
 
-        image_path = (
-            build_service_map(
-                WPC_ERO_MAPSERVER,
-                f'show:'
-                f'{product.day - 1}',
-                prefix=
-                    f'wpc_ero_d'
-                    f'{product.day}_',
-            )
+        image_path = build_service_map(
+            WPC_ERO_MAPSERVER,
+            f'show:{product.day - 1}',
+            prefix=
+                f'wpc_ero_d{product.day}_',
         )
 
     except Exception:
@@ -9352,8 +8376,7 @@ def poll_wpc_ero(
     for day in days:
 
         source = (
-            f'wpc_ero_day'
-            f'{day}'
+            f'wpc_ero_day{day}'
         )
 
         try:
@@ -9418,9 +8441,7 @@ def poll_wpc_ero(
 
             finally:
 
-                cleanup_post(
-                    post
-                )
+                cleanup_post(post)
 
         except Exception:
 
@@ -9465,14 +8486,9 @@ def parse_wmo_ddhhmm_from_text(
     )
 
     if not match:
-
         return None
 
-    stamp = (
-        match.group(
-            1
-        )
-    )
+    stamp = match.group(1)
 
     day = int(
         stamp[:2]
@@ -9498,26 +8514,17 @@ def parse_wmo_ddhhmm_from_text(
         1,
     ):
 
-        year = (
-            now.year
-        )
-
-        month = (
-            now.month
-            +
-            offset
-        )
+        year = now.year
+        month = now.month + offset
 
         if month < 1:
 
             month = 12
-
             year -= 1
 
         elif month > 12:
 
             month = 1
-
             year += 1
 
         try:
@@ -9553,9 +8560,7 @@ def parse_wmo_ddhhmm_from_text(
 
     if plausible:
 
-        return max(
-            plausible
-        )
+        return max(plausible)
 
     if candidates:
 
@@ -9604,22 +8609,14 @@ def wpc_hsd_from_products_api(
         ),
     )
 
-    payload = (
-        response.json()
-    )
+    payload = response.json()
 
     graph = (
-        payload.get(
-            '@graph'
-        )
+        payload.get('@graph')
         or
-        payload.get(
-            'products'
-        )
+        payload.get('products')
         or
-        payload.get(
-            'features'
-        )
+        payload.get('features')
         or
         []
     )
@@ -9660,13 +8657,9 @@ def wpc_hsd_from_products_api(
 
         issued = parse_any_datetime(
             str(
-                item.get(
-                    'issuanceTime'
-                )
+                item.get('issuanceTime')
                 or
-                item.get(
-                    'issuance_time'
-                )
+                item.get('issuance_time')
                 or
                 ''
             )
@@ -9701,14 +8694,10 @@ def wpc_hsd_from_products_api(
         reverse=True,
     )
 
-    issued_dt, newest = (
-        candidates[0]
-    )
+    issued_dt, newest = candidates[0]
 
     if (
-        issued_dt.year
-        >
-        1970
+        issued_dt.year > 1970
         and
         max(
             0.0,
@@ -9731,13 +8720,9 @@ def wpc_hsd_from_products_api(
         )
 
     reference = str(
-        newest.get(
-            '@id'
-        )
+        newest.get('@id')
         or
-        newest.get(
-            'id'
-        )
+        newest.get('id')
         or
         ''
     ).strip()
@@ -9760,52 +8745,38 @@ def wpc_hsd_from_products_api(
             )
         )
         else
-        'https://'
-        'api.weather.gov/'
+        f'https://api.weather.gov/'
         f'products/{reference}'
     )
 
-    detail = (
-        http_get(
-            detail_url,
-            headers={
-                'Accept':
-                    'application/ld+json,'
-                    'application/json'
-            },
-            timeout=(
-                8,
-                35,
-            ),
-        )
-        .json()
-    )
+    detail = http_get(
+        detail_url,
+        headers={
+            'Accept':
+                'application/ld+json,'
+                'application/json'
+        },
+        timeout=(
+            8,
+            35,
+        ),
+    ).json()
 
     text = str(
-        detail.get(
-            'productText'
-        )
+        detail.get('productText')
         or
-        detail.get(
-            'product_text'
-        )
+        detail.get('product_text')
         or
         ''
     )
 
     issuance = squish(
         str(
-            detail.get(
-                'issuanceTime'
-            )
+            detail.get('issuanceTime')
             or
-            detail.get(
-                'issuance_time'
-            )
+            detail.get('issuance_time')
             or
-            newest.get(
-                'issuanceTime'
-            )
+            newest.get('issuanceTime')
             or
             ''
         )
@@ -9813,13 +8784,9 @@ def wpc_hsd_from_products_api(
 
     identity = squish(
         str(
-            detail.get(
-                'id'
-            )
+            detail.get('id')
             or
-            detail.get(
-                '@id'
-            )
+            detail.get('@id')
             or
             reference
         )
@@ -9865,10 +8832,8 @@ def wpc_hsd_from_tgftp(
             '',
         )
 
-    issued_dt = (
-        parse_wmo_ddhhmm_from_text(
-            text
-        )
+    issued_dt = parse_wmo_ddhhmm_from_text(
+        text
     )
 
     if issued_dt is not None:
@@ -9905,9 +8870,7 @@ def wpc_hsd_from_tgftp(
     return (
         text,
         issuance,
-        sha256_text(
-            text
-        ),
+        sha256_text(text),
     )
 
 
@@ -9932,9 +8895,7 @@ def parse_wpc_heavy_snow_discussion(
 
     except Exception as exc:
 
-        api_error = (
-            exc
-        )
+        api_error = exc
 
         log.warning(
             'NWS Products API HSD '
@@ -9955,9 +8916,7 @@ def parse_wpc_heavy_snow_discussion(
                 wpc_hsd_from_tgftp()
             )
 
-            text = (
-                fallback_text
-            )
+            text = fallback_text
 
             issuance = (
                 issuance
@@ -9988,19 +8947,20 @@ def parse_wpc_heavy_snow_discussion(
 
         return None
 
-    upper = (
-        text.upper()
-    )
+    upper = text.upper()
 
     if (
         'QPFHSD'
-        not in upper
+        not in
+        upper
         and
         'HEAVY SNOW'
-        not in upper
+        not in
+        upper
         and
         'PROBABILISTIC HEAVY SNOW'
-        not in upper
+        not in
+        upper
     ):
 
         raise ValueError(
@@ -10013,8 +8973,7 @@ def parse_wpc_heavy_snow_discussion(
         line.strip()
         for line
         in text.splitlines()
-        if
-        line.strip()
+        if line.strip()
     ]
 
     valid_line = next(
@@ -10048,12 +9007,9 @@ def parse_wpc_heavy_snow_discussion(
 
     headline = (
         squish(
-            headline_match.group(
-                1
-            )
+            headline_match.group(1)
         )
-        if
-        headline_match
+        if headline_match
         else
         ''
     )
@@ -10067,11 +9023,8 @@ def parse_wpc_heavy_snow_discussion(
         )
 
         issuance = (
-            iso_z(
-                issued_dt
-            )
-            if
-            issued_dt
+            iso_z(issued_dt)
+            if issued_dt
             else
             ''
         )
@@ -10165,17 +9118,13 @@ def parse_wpc_winter_package_updates(
             continue
 
         issue = first_nonempty(
-            attribute.get(
-                'issue_time'
-            )
+            attribute.get('issue_time')
             for attribute
             in attrs
         )
 
         valid = first_nonempty(
-            attribute.get(
-                'valid_time'
-            )
+            attribute.get('valid_time')
             for attribute
             in attrs
         )
@@ -10199,9 +9148,7 @@ def parse_wpc_winter_package_updates(
 
                 issue = iso_z(
                     datetime.fromtimestamp(
-                        float(
-                            raw
-                        )
+                        float(raw)
                         /
                         1000.0,
                         tz=
@@ -10230,12 +9177,10 @@ def render_wpc_hsd(
 
     try:
 
-        image_path = (
-            build_service_map(
-                WPC_WINTER_MAPSERVER,
-                'show:1,2,3,4',
-                prefix='wpc_hsd_',
-            )
+        image_path = build_service_map(
+            WPC_WINTER_MAPSERVER,
+            'show:1,2,3,4',
+            prefix='wpc_hsd_',
         )
 
     except Exception:
@@ -10302,14 +9247,11 @@ def render_wpc_winter_day(
 
     try:
 
-        image_path = (
-            build_service_map(
-                WPC_WINTER_MAPSERVER,
-                layers,
-                prefix=
-                    f'wpc_winter_d'
-                    f'{day}_',
-            )
+        image_path = build_service_map(
+            WPC_WINTER_MAPSERVER,
+            layers,
+            prefix=
+                f'wpc_winter_d{day}_',
         )
 
     except Exception:
@@ -10335,8 +9277,7 @@ def render_wpc_winter_day(
                     (
                         f' Valid '
                         f'{truncate(valid, 60)}'
-                        if
-                        valid
+                        if valid
                         else
                         ''
                     )
@@ -10424,8 +9365,7 @@ def poll_wpc_winter(
                     )
 
                     if (
-                        not
-                        current_status
+                        not current_status
                         or
                         current_status
                         ==
@@ -10438,10 +9378,8 @@ def poll_wpc_winter(
 
                         try:
 
-                            post = (
-                                render_wpc_hsd(
-                                    disc
-                                )
+                            post = render_wpc_hsd(
+                                disc
                             )
 
                             publish_once(
@@ -10454,9 +9392,7 @@ def poll_wpc_winter(
 
                         finally:
 
-                            cleanup_post(
-                                post
-                            )
+                            cleanup_post(post)
 
         except Exception:
 
@@ -10517,9 +9453,7 @@ def poll_wpc_winter(
                     'active package '
                     'timestamp(s)',
                     source,
-                    len(
-                        keyed
-                    ),
+                    len(keyed),
                 )
 
             else:
@@ -10552,12 +9486,10 @@ def poll_wpc_winter(
 
                     try:
 
-                        post = (
-                            render_wpc_winter_day(
-                                day,
-                                issue,
-                                valid,
-                            )
+                        post = render_wpc_winter_day(
+                            day,
+                            issue,
+                            valid,
                         )
 
                         publish_once(
@@ -10570,9 +9502,7 @@ def poll_wpc_winter(
 
                     finally:
 
-                        cleanup_post(
-                            post
-                        )
+                        cleanup_post(post)
 
         except Exception:
 
@@ -10743,9 +9673,7 @@ def main() -> int:
         ),
     ]
 
-    base = (
-        time.monotonic()
-    )
+    base = time.monotonic()
 
     for index, job in enumerate(
         jobs
@@ -10763,9 +9691,7 @@ def main() -> int:
 
         while not STOP_REQUESTED:
 
-            now = (
-                time.monotonic()
-            )
+            now = time.monotonic()
 
             for job in jobs:
 
@@ -10773,11 +9699,7 @@ def main() -> int:
 
                     break
 
-                if (
-                    now
-                    <
-                    job.next_due
-                ):
+                if now < job.next_due:
 
                     continue
 

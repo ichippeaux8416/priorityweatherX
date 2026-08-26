@@ -6450,12 +6450,12 @@ def find_matching_mcd_feature(
     )
 
     target = digits_only(
-        number
-    )
+    number
+).lstrip("0")
 
-    candidates: list[
-        SPCGeometryMatch
-    ] = []
+candidates: list[
+    SPCGeometryMatch
+] = []
 
     for feature in features:
 

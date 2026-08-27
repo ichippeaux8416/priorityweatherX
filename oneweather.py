@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-26-mapbox-spc-v8.2-watchfull-probs'
+BUILD_ID = '2026-08-27-mapbox-outlook-text-v8.3'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -40,7 +40,7 @@ X_REFRESH_TOKEN = os.getenv('X_REFRESH_TOKEN', '').strip()
 DB_PATH = os.getenv('DB_PATH', '/var/data/oneweather.sqlite3').strip()
 DRY_RUN = os.getenv('DRY_RUN', 'false').lower() in {'1', 'true', 'yes', 'on'}
 INCLUDE_SOURCE_URLS = os.getenv('INCLUDE_SOURCE_URLS', 'false').lower() in {'1', 'true', 'yes', 'on'}
-POST_TEXT_LIMIT = max(180, min(270, int(os.getenv('POST_TEXT_LIMIT', '265'))))
+POST_TEXT_LIMIT = max(1000, min(25000, int(os.getenv('POST_TEXT_LIMIT', '25000'))))
 NWS_POLL_SECONDS = max(30, int(os.getenv('NWS_POLL_SECONDS', '30')))
 SPC_POLL_SECONDS = max(30, int(os.getenv('SPC_POLL_SECONDS', '60')))
 NHC_POLL_SECONDS = max(30, int(os.getenv('NHC_POLL_SECONDS', '60')))
@@ -49,7 +49,13 @@ WPC_ERO_POLL_SECONDS = max(60, int(os.getenv('WPC_ERO_POLL_SECONDS', '120')))
 WPC_WINTER_POLL_SECONDS = max(60, int(os.getenv('WPC_WINTER_POLL_SECONDS', '300')))
 TORNADO_MAX_POST_AGE_MINUTES = max(5, int(os.getenv('TORNADO_MAX_POST_AGE_MINUTES', '30')))
 WINTER_ALERT_MAX_POST_AGE_MINUTES = max(30, int(os.getenv('WINTER_ALERT_MAX_POST_AGE_MINUTES', '360')))
-NWS_QUERY_BACKFILL_MAX_MINUTES = max(15, min(10080, int(os.getenv('NWS_QUERY_BACKFILL_MAX_MINUTES', '360'))))
+NWS_QUERY_BACKFILL_MAX_MINUTES = max(
+    15,
+    min(
+        10080,
+        int(os.getenv('NWS_QUERY_BACKFILL_MAX_MINUTES', '360')),
+    ),
+)
 WPC_HSD_MAX_AGE_HOURS = max(12, int(os.getenv('WPC_HSD_MAX_AGE_HOURS', '36')))
 ENABLE_SPC_FIRE = os.getenv('ENABLE_SPC_FIRE', 'true').lower() in {'1', 'true', 'yes', 'on'}
 ENABLE_NHC_DISCUSSIONS = os.getenv('ENABLE_NHC_DISCUSSIONS', 'true').lower() in {'1', 'true', 'yes', 'on'}
@@ -198,6 +204,7 @@ def request_stop(
 ) -> None:
     global STOP_REQUESTED
     STOP_REQUESTED = True
+
     log.info(
         'Received signal %s; stopping after current work',
         signum,
@@ -257,10 +264,14 @@ def remove_emojis(
 
         if (
             0x1F000 <= cp <= 0x1FAFF
-            or 0x2600 <= cp <= 0x26FF
-            or 0x2700 <= cp <= 0x27BF
-            or 0xFE00 <= cp <= 0xFE0F
-            or 0x1F1E6 <= cp <= 0x1F1FF
+            or
+            0x2600 <= cp <= 0x26FF
+            or
+            0x2700 <= cp <= 0x27BF
+            or
+            0xFE00 <= cp <= 0xFE0F
+            or
+            0x1F1E6 <= cp <= 0x1F1FF
         ):
             continue
 
@@ -326,9 +337,18 @@ def truncate(
     if (
         ' ' in cut
         and
-        len(cut.rsplit(' ', 1)[0])
+        len(
+            cut.rsplit(
+                ' ',
+                1,
+            )[0]
+        )
         >=
-        int(limit * 0.72)
+        int(
+            limit
+            *
+            0.72
+        )
     ):
         cut = cut.rsplit(
             ' ',
@@ -474,7 +494,8 @@ def first_parameter(
     *names: str,
 ) -> str:
     lowered = {
-        str(key).lower(): value
+        str(key).lower():
+            value
         for key, value
         in (
             parameters
@@ -563,9 +584,7 @@ def extract_hazards(
             and
             label not in hazards
         ):
-            hazards.append(
-                label
-            )
+            hazards.append(label)
 
     add(
         'Tornadoes',
@@ -1488,10 +1507,7 @@ class XPublisher:
         raw: bytes,
         media_type: str,
     ) -> requests.Response:
-        assert (
-            self.oauth
-            is not None
-        )
+        assert self.oauth is not None
 
         payload = {
             'media':
@@ -1530,10 +1546,7 @@ class XPublisher:
         raw: bytes,
         media_type: str,
     ) -> requests.Response:
-        assert (
-            self.oauth
-            is not None
-        )
+        assert self.oauth is not None
 
         init = self.oauth.request(
             'POST',
@@ -1648,10 +1661,7 @@ class XPublisher:
         if self.dry_run:
             return 'dry-run-media'
 
-        assert (
-            self.oauth
-            is not None
-        )
+        assert self.oauth is not None
 
         suffix = (
             Path(path)
@@ -1695,11 +1705,9 @@ class XPublisher:
         ) as file_handle:
             raw = file_handle.read()
 
-        response = (
-            self._upload_image_json(
-                raw,
-                media_type,
-            )
+        response = self._upload_image_json(
+            raw,
+            media_type,
         )
 
         if not (
@@ -1709,13 +1717,8 @@ class XPublisher:
             <
             300
         ):
-            simple_status = (
-                response.status_code
-            )
-
-            simple_body = (
-                response.text[:500]
-            )
+            simple_status = response.status_code
+            simple_body = response.text[:500]
 
             log.warning(
                 'X simple media upload '
@@ -1725,11 +1728,9 @@ class XPublisher:
             )
 
             try:
-                response = (
-                    self._upload_image_chunked(
-                        raw,
-                        media_type,
-                    )
+                response = self._upload_image_chunked(
+                    raw,
+                    media_type,
                 )
 
             except XError as exc:
@@ -1899,10 +1900,7 @@ class XPublisher:
 
             return 'dry-run-post'
 
-        assert (
-            self.oauth
-            is not None
-        )
+        assert self.oauth is not None
 
         payload: dict[
             str,
@@ -1934,11 +1932,7 @@ class XPublisher:
             ambiguous_if_sent=True,
         )
 
-        if (
-            response.status_code
-            ==
-            429
-        ):
+        if response.status_code == 429:
             raise XRetryableError(
                 'X create-post '
                 'rate limited: '
@@ -2005,10 +1999,7 @@ class XPublisher:
         if self.dry_run:
             return 'dry-run'
 
-        assert (
-            self.oauth
-            is not None
-        )
+        assert self.oauth is not None
 
         response = self.oauth.request(
             'GET',
@@ -3023,10 +3014,21 @@ def map_bbox_for_rings(
         in points
     ]
 
-    minx = min(xs)
-    maxx = max(xs)
-    miny = min(ys)
-    maxy = max(ys)
+    minx = min(
+        xs
+    )
+
+    maxx = max(
+        xs
+    )
+
+    miny = min(
+        ys
+    )
+
+    maxy = max(
+        ys
+    )
 
     cx = (
         minx
@@ -4273,6 +4275,18 @@ def spc_field(
     )
 
 
+SPC_DAY_WORDS = {
+    1: 'One',
+    2: 'Two',
+    3: 'Three',
+    4: 'Four',
+    5: 'Five',
+    6: 'Six',
+    7: 'Seven',
+    8: 'Eight',
+}
+
+
 def spc_product_name(
     item: RSSItem,
     kind: str,
@@ -4348,14 +4362,22 @@ def spc_product_name(
             re.I,
         )
 
+        if match:
+            day = int(
+                match.group(
+                    1
+                )
+            )
+
+            return (
+                f'Day '
+                f'{SPC_DAY_WORDS.get(day, str(day))} '
+                'Convective Outlook',
+                '',
+            )
+
         return (
-            (
-                f'Day {match.group(1)} '
-                f'Convective Outlook'
-                if match
-                else
-                'Convective Outlook'
-            ),
+            'Convective Outlook',
             '',
         )
 
@@ -4366,14 +4388,22 @@ def spc_product_name(
             re.I,
         )
 
+        if match:
+            day = int(
+                match.group(
+                    1
+                )
+            )
+
+            return (
+                f'Day '
+                f'{SPC_DAY_WORDS.get(day, str(day))} '
+                'Fire Weather Outlook',
+                '',
+            )
+
         return (
-            (
-                f'Day {match.group(1)} '
-                f'Fire Weather Outlook'
-                if match
-                else
-                'Fire Weather Outlook'
-            ),
+            'Fire Weather Outlook',
             '',
         )
 
@@ -4461,6 +4491,174 @@ def spc_location(
     return 'United States'
 
 
+def smart_title_region(
+    value: str,
+) -> str:
+    value = squish(
+        value
+    ).strip(
+        ' .;:-'
+    )
+
+    value = re.sub(
+        r'^(?:THE\s+)',
+        '',
+        value,
+        flags=re.I,
+    )
+
+    value = re.sub(
+        r'^(?:PARTS?|PORTIONS?)\s+OF\s+(?:THE\s+)?',
+        '',
+        value,
+        flags=re.I,
+    )
+
+    value = re.sub(
+        r'\s+AND\s+PORTIONS?\s+OF\s+(?:THE\s+)?',
+        ' and ',
+        value,
+        flags=re.I,
+    )
+
+    value = re.sub(
+        r'\s+AND\s+PARTS?\s+OF\s+(?:THE\s+)?',
+        ' and ',
+        value,
+        flags=re.I,
+    )
+
+    if value.upper() == value:
+        value = value.title()
+
+    for word in (
+        ' And ',
+        ' Of ',
+        ' The ',
+        ' In ',
+        ' Across ',
+        ' Near ',
+    ):
+        value = value.replace(
+            word,
+            word.lower(),
+        )
+
+    return value.strip()
+
+
+def spc_convective_risk_location(
+    text: str,
+    category: str,
+) -> str:
+    flat = squish(
+        text
+    )
+
+    category_word = re.sub(
+        r'\s+Risk\s*$',
+        '',
+        squish(
+            category
+        ),
+        flags=re.I,
+    )
+
+    category_pattern = (
+        re.escape(
+            category_word
+        )
+        if
+        category_word
+        else
+        r'(?:Marginal|Slight|Enhanced|Moderate|High)'
+    )
+
+    patterns = [
+        (
+            rf'THERE IS (?:AN?|A)\s+'
+            rf'{category_pattern}\s+'
+            r'RISK OF SEVERE THUNDERSTORMS\s+'
+            r'(?:ACROSS|FOR)\s+'
+            r'(.+?)'
+            r'(?=\.\.\.|\.(?:\s|$)|$)'
+        ),
+        (
+            rf'{category_pattern}\s+'
+            r'RISK OF SEVERE THUNDERSTORMS\s+'
+            r'(?:ACROSS|FOR)\s+'
+            r'(.+?)'
+            r'(?=\.\.\.|\.(?:\s|$)|$)'
+        ),
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            flat,
+            re.I,
+        )
+
+        if not match:
+            continue
+
+        region = smart_title_region(
+            match.group(
+                1
+            )
+        )
+
+        if (
+            region
+            and
+            region.lower()
+            not in {
+                'the',
+                'parts',
+                'portions',
+            }
+        ):
+            return truncate(
+                region,
+                220,
+            )
+
+    return ''
+
+
+def format_spc_issue_z(
+    value: Any,
+    fallback: Optional[
+        datetime
+    ] = None,
+) -> str:
+    dt = arcgis_datetime(
+        value
+    )
+
+    if (
+        dt is None
+        and
+        fallback is not None
+    ):
+        dt = fallback.astimezone(
+            timezone.utc
+        )
+
+    if dt is None:
+        return ''
+
+    return (
+        dt.astimezone(
+            timezone.utc
+        )
+        .strftime(
+            '%H%MZ'
+        )
+        .lower()
+    )
+
+
 def find_local_issue_clock(
     text: str,
 ) -> str:
@@ -4480,16 +4678,29 @@ def find_local_issue_clock(
     digits = digits.strip()
 
     if len(digits) <= 2:
-        hour = int(digits)
+        hour = int(
+            digits
+        )
+
         minute = 0
 
     elif len(digits) == 3:
-        hour = int(digits[0])
-        minute = int(digits[1:])
+        hour = int(
+            digits[0]
+        )
+
+        minute = int(
+            digits[1:]
+        )
 
     else:
-        hour = int(digits[:-2])
-        minute = int(digits[-2:])
+        hour = int(
+            digits[:-2]
+        )
+
+        minute = int(
+            digits[-2:]
+        )
 
     return (
         f'{hour}:'
@@ -4930,8 +5141,7 @@ def fetch_mapbox_light_base(
         'static/'
         f'{lon:.6f},'
         f'{lat:.6f},'
-        f'{zoom:.3f},'
-        '0/'
+        f'{zoom:.3f},0/'
         f'{width}x{height}'
     )
 
@@ -5201,12 +5411,12 @@ def add_reference_boundaries(
                     draw.line(
                         closed,
                         fill=(
-                            92,
-                            92,
-                            92,
+                            0,
+                            0,
+                            0,
                             255,
                         ),
-                        width=4,
+                        width=5,
                         joint='curve',
                     )
 
@@ -6137,8 +6347,7 @@ def build_mapbox_spc_outlook_map(
     )
 
     product = export_map_image(
-        f'{SPC_OUTLOOK_MAPSERVER}/'
-        'export',
+        f'{SPC_OUTLOOK_MAPSERVER}/export',
         bbox,
         width,
         height,
@@ -6161,6 +6370,96 @@ def build_mapbox_spc_outlook_map(
         base,
         prefix=
             f'spc_day{day}_',
+    )
+
+
+def build_mapbox_wpc_ero_map(
+    day: int,
+) -> str:
+    width = 1200
+    height = 760
+    layer = day - 1
+
+    features = arcgis_query_features(
+        WPC_ERO_MAPSERVER,
+        layer,
+        out_fields='*',
+        return_geometry=True,
+        out_sr=3857,
+    )
+
+    all_points: list[
+        tuple[
+            float,
+            float,
+        ]
+    ] = []
+
+    for feature in features:
+        geometry = (
+            feature.get(
+                'geometry'
+            )
+            or
+            {}
+        )
+
+        if geometry:
+            all_points.extend(
+                mercator_points_from_arcgis_geometry(
+                    geometry,
+                    default_wkid=3857,
+                )
+            )
+
+    if all_points:
+        bbox = mercator_bbox_from_points(
+            all_points,
+            width,
+            height,
+            padding_factor=1.42,
+            min_width_m=3200000.0,
+            min_height_m=1900000.0,
+        )
+
+    else:
+        bbox = mercator_bbox_from_lonlat(
+            -128,
+            22,
+            -65,
+            52,
+        )
+
+    base = fetch_mapbox_light_base(
+        bbox,
+        width,
+        height,
+    )
+
+    product = export_map_image(
+        f'{WPC_ERO_MAPSERVER}/export',
+        bbox,
+        width,
+        height,
+        layers=
+            f'show:{layer}',
+    )
+
+    base.alpha_composite(
+        product
+    )
+
+    base = add_reference_boundaries(
+        base,
+        bbox,
+        counties=False,
+        states=True,
+    )
+
+    return save_map_image(
+        base,
+        prefix=
+            f'wpc_ero_d{day}_',
     )
 
 
@@ -6919,12 +7218,19 @@ def arcgis_datetime(
     ):
         return None
 
-    if isinstance(
-        value,
-        (
-            int,
-            float,
-        ),
+    if (
+        isinstance(
+            value,
+            (
+                int,
+                float,
+            ),
+        )
+        or
+        re.fullmatch(
+            r'\d{10,13}(?:\.\d+)?',
+            str(value).strip(),
+        )
     ):
         raw = float(
             value
@@ -7337,10 +7643,47 @@ def render_spc(
             snapshot.image_path
         )
 
-        if snapshot.category:
-            details.append(
-                'Category: '
-                +
+        issue_z = format_spc_issue_z(
+            snapshot.issued,
+            item.published,
+        )
+
+        risk_region = spc_convective_risk_location(
+            page_text,
+            snapshot.category,
+        )
+
+        category_name = re.sub(
+            r'\s+Risk\s*$',
+            '',
+            squish(
+                snapshot.category
+            ),
+            flags=re.I,
+        ).title()
+
+        post_lines: list[str] = [
+            product_name,
+            (
+                f'Issued at {issue_z}'
+                if issue_z
+                else
+                time_line
+            ),
+        ]
+
+        if (
+            category_name
+            and
+            risk_region
+        ):
+            post_lines.append(
+                f'{category_name} risks in '
+                f'{risk_region}'
+            )
+
+        elif snapshot.category:
+            post_lines.append(
                 snapshot.category
             )
 
@@ -7348,19 +7691,19 @@ def render_spc(
             1,
             2,
         ):
-            details.append(
-                'Max risks: '
+            post_lines.append(
+                'Max Hazard Probabilities: '
                 f'Tornado '
-                f'{snapshot.tornado_risk or "N/A"}, '
+                f'{snapshot.tornado_risk or "N/A"} | '
                 f'Wind '
-                f'{snapshot.wind_risk or "N/A"}, '
+                f'{snapshot.wind_risk or "N/A"} | '
                 f'Hail '
                 f'{snapshot.hail_risk or "N/A"}'
             )
 
         elif day == 3:
-            details.append(
-                'Max severe risk: '
+            post_lines.append(
+                'Max Severe Probability: '
                 +
                 (
                     snapshot.severe_risk
@@ -7394,8 +7737,8 @@ def render_spc(
             )
 
             if probability_risk:
-                details.append(
-                    'Max severe risk: '
+                post_lines.append(
+                    'Max Severe Probability: '
                     +
                     probability_risk
                 )
@@ -7406,7 +7749,15 @@ def render_spc(
                 'was not ready yet'
             )
 
-    elif kind == 'md':
+        return RenderedPost(
+            fit_post(
+                post_lines,
+                item.link,
+            ),
+            image_path,
+        )
+
+    if kind == 'md':
         concerning = spc_field(
             page_text,
             'Concerning',
@@ -7418,7 +7769,7 @@ def render_spc(
                 +
                 truncate(
                     concerning,
-                    85,
+                    140,
                 )
             )
 
@@ -9515,56 +9866,54 @@ def render_ero(
 
     try:
         image_path = (
-            build_service_map(
-                WPC_ERO_MAPSERVER,
-                f'show:'
-                f'{product.day - 1}',
-                prefix=
-                    f'wpc_ero_d'
-                    f'{product.day}_',
+            build_mapbox_wpc_ero_map(
+                product.day
             )
         )
 
     except Exception:
         log.exception(
-            'Could not build '
-            'WPC ERO Day %d image',
+            'Could not build WPC '
+            'ERO Day %d Mapbox image',
             product.day,
         )
+
+    day_name = SPC_DAY_WORDS.get(
+        product.day,
+        str(
+            product.day
+        ),
+    )
+
+    issue_z = format_spc_issue_z(
+        product.issued
+    )
 
     return RenderedPost(
         fit_post(
             [
-                f'Day {product.day} '
+                f'Day {day_name} '
                 'Excessive Rainfall Outlook',
 
-                'United States',
-
                 (
+                    f'Issued at {issue_z}'
+                    if issue_z
+                    else
                     f'Issued '
                     f'{format_utc_clock(product.issued)}'
-                    +
-                    (
-                        f' Valid '
-                        f'{truncate(product.valid, 60)}'
-                        if
-                        product.valid
-                        else
-                        ''
-                    )
                 ),
 
-                'Hazards: Excessive rainfall, '
-                'flash flooding',
-
                 (
-                    'Highest risk: '
-                    f'{truncate(product.highest_risk, 70)}'
+                    f'Highest Risk: '
+                    f'{truncate(product.highest_risk, 90)}'
                     if
                     product.highest_risk
                     else
                     ''
                 ),
+
+                'Hazards: Excessive rainfall | '
+                'Flash flooding',
             ]
         ),
         image_path,

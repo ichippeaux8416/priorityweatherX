@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-27-fire-iem-tor-v8.8'
+BUILD_ID = '2026-08-27-fast-direct-mcd-nhc-allbasins-v8.9'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -41,14 +41,18 @@ DB_PATH = os.getenv('DB_PATH', '/var/data/oneweather.sqlite3').strip()
 DRY_RUN = os.getenv('DRY_RUN', 'false').lower() in {'1', 'true', 'yes', 'on'}
 INCLUDE_SOURCE_URLS = os.getenv('INCLUDE_SOURCE_URLS', 'false').lower() in {'1', 'true', 'yes', 'on'}
 POST_TEXT_LIMIT = max(1000, min(25000, int(os.getenv('POST_TEXT_LIMIT', '25000'))))
-NWS_POLL_SECONDS = max(30, int(os.getenv('NWS_POLL_SECONDS', '30')))
-SPC_POLL_SECONDS = max(30, int(os.getenv('SPC_POLL_SECONDS', '60')))
-SPC_RAPID_RETRY_SECONDS = max(5, int(os.getenv('SPC_RAPID_RETRY_SECONDS', '10')))
+NWS_POLL_SECONDS = max(5, int(os.getenv('NWS_POLL_SECONDS', '10')))
+SPC_POLL_SECONDS = max(10, int(os.getenv('SPC_POLL_SECONDS', '30')))
+SPC_MD_POLL_SECONDS = max(5, int(os.getenv('SPC_MD_POLL_SECONDS', '8')))
+SPC_WATCH_POLL_SECONDS = max(8, int(os.getenv('SPC_WATCH_POLL_SECONDS', '12')))
+SPC_OUTLOOK_POLL_SECONDS = max(10, int(os.getenv('SPC_OUTLOOK_POLL_SECONDS', '15')))
+SPC_FIRE_POLL_SECONDS = max(10, int(os.getenv('SPC_FIRE_POLL_SECONDS', '20')))
+SPC_RAPID_RETRY_SECONDS = max(5, int(os.getenv('SPC_RAPID_RETRY_SECONDS', '8')))
 SPC_RAPID_RETRY_WINDOW_SECONDS = max(30, int(os.getenv('SPC_RAPID_RETRY_WINDOW_SECONDS', '120')))
-NHC_POLL_SECONDS = max(30, int(os.getenv('NHC_POLL_SECONDS', '60')))
+NHC_POLL_SECONDS = max(10, int(os.getenv('NHC_POLL_SECONDS', '15')))
 NHC_FULL_SWEEP_SECONDS = max(300, int(os.getenv('NHC_FULL_SWEEP_SECONDS', '600')))
-WPC_ERO_POLL_SECONDS = max(60, int(os.getenv('WPC_ERO_POLL_SECONDS', '120')))
-WPC_WINTER_POLL_SECONDS = max(60, int(os.getenv('WPC_WINTER_POLL_SECONDS', '300')))
+WPC_ERO_POLL_SECONDS = max(15, int(os.getenv('WPC_ERO_POLL_SECONDS', '30')))
+WPC_WINTER_POLL_SECONDS = max(30, int(os.getenv('WPC_WINTER_POLL_SECONDS', '60')))
 TORNADO_MAX_POST_AGE_MINUTES = max(5, int(os.getenv('TORNADO_MAX_POST_AGE_MINUTES', '30')))
 WINTER_ALERT_MAX_POST_AGE_MINUTES = max(30, int(os.getenv('WINTER_ALERT_MAX_POST_AGE_MINUTES', '360')))
 NWS_QUERY_BACKFILL_MAX_MINUTES = max(
@@ -96,6 +100,15 @@ if ENABLE_SPC_FIRE:
         'https://www.spc.noaa.gov/products/spcfwrss.xml',
         'fire',
     )
+
+# Direct AWIPS-distributed MCD text.  This generally appears before slower
+# downstream SPC GIS layers and lets the bot build the official polygon
+# directly from the product LAT...LON block.
+SPC_MCD_RAW_URL = (
+    'https://tgftp.nws.noaa.gov/'
+    'data/raw/ac/'
+    'acus11.kwns.swo.mcd.txt'
+)
 
 NHC_TWO_FEEDS = {
     'nhc_two_atlantic': 'https://www.nhc.noaa.gov/xml/TWOAT.xml',
@@ -3457,6 +3470,254 @@ def floor_to_five_minutes(
     )
 
 
+def iem_radar_overlay_has_pixels(
+    image: Image.Image,
+) -> bool:
+    rgba = image.convert(
+        'RGBA'
+    )
+
+    alpha = rgba.getchannel(
+        'A'
+    )
+
+    if alpha.getbbox() is None:
+        return False
+
+    extrema = alpha.getextrema()
+
+    if not extrema or extrema[1] <= 0:
+        return False
+
+    # A WMS service exception can occasionally arrive as an opaque nearly
+    # uniform image.  Real N0Q overlays have meaningful pixel variation.
+    sample = rgba.resize(
+        (
+            96,
+            64,
+        ),
+        Image.Resampling.BILINEAR,
+    )
+
+    colors = sample.getcolors(
+        maxcolors=96 * 64
+    )
+
+    if colors is not None and len(colors) <= 2:
+        nontransparent = [
+            color
+            for _count, color
+            in colors
+            if color[3] > 0
+        ]
+
+        if len(nontransparent) <= 1:
+            return False
+
+    return True
+
+
+def iem_tms_zoom_for_bbox(
+    bbox: tuple[
+        float,
+        float,
+        float,
+        float,
+    ],
+    width: int,
+    height: int,
+) -> int:
+    minx, miny, maxx, maxy = bbox
+    world_m = 2.0 * math.pi * 6378137.0
+    span_x = max(maxx - minx, 1.0)
+    span_y = max(maxy - miny, 1.0)
+
+    zoom_x = math.log2(
+        max(
+            1.0,
+            width * world_m / (256.0 * span_x),
+        )
+    )
+    zoom_y = math.log2(
+        max(
+            1.0,
+            height * world_m / (256.0 * span_y),
+        )
+    )
+
+    return max(
+        3,
+        min(
+            10,
+            int(math.floor(min(zoom_x, zoom_y))) + 1,
+        ),
+    )
+
+
+def fetch_iem_n0q_tms_overlay(
+    bbox: tuple[
+        float,
+        float,
+        float,
+        float,
+    ],
+    width: int,
+    height: int,
+    frame: datetime,
+) -> Image.Image:
+    limit = 20037508.342789244
+    zoom = iem_tms_zoom_for_bbox(
+        bbox,
+        width,
+        height,
+    )
+    ntiles = 2 ** zoom
+    world_pixels = 256 * ntiles
+
+    minx, miny, maxx, maxy = bbox
+
+    def world_pixel_x(value: float) -> float:
+        return (
+            (value + limit)
+            /
+            (2.0 * limit)
+            *
+            world_pixels
+        )
+
+    def world_pixel_y(value: float) -> float:
+        return (
+            (limit - value)
+            /
+            (2.0 * limit)
+            *
+            world_pixels
+        )
+
+    left_world = world_pixel_x(minx)
+    right_world = world_pixel_x(maxx)
+    top_world = world_pixel_y(maxy)
+    bottom_world = world_pixel_y(miny)
+
+    tile_x0 = max(0, min(ntiles - 1, int(math.floor(left_world / 256.0))))
+    tile_x1 = max(0, min(ntiles - 1, int(math.floor((right_world - 1e-6) / 256.0))))
+    tile_y0 = max(0, min(ntiles - 1, int(math.floor(top_world / 256.0))))
+    tile_y1 = max(0, min(ntiles - 1, int(math.floor((bottom_world - 1e-6) / 256.0))))
+
+    mosaic = Image.new(
+        'RGBA',
+        (
+            (tile_x1 - tile_x0 + 1) * 256,
+            (tile_y1 - tile_y0 + 1) * 256,
+        ),
+        (
+            0,
+            0,
+            0,
+            0,
+        ),
+    )
+
+    layer = (
+        'ridge::USCOMP-N0Q-'
+        +
+        frame.strftime('%Y%m%d%H%M')
+    )
+
+    got_tile = False
+
+    for tile_x in range(tile_x0, tile_x1 + 1):
+        for tile_y in range(tile_y0, tile_y1 + 1):
+            tile_url = (
+                'https://mesonet.agron.iastate.edu/'
+                'c/tile.py/1.0.0/'
+                f'{layer}/'
+                f'{zoom}/{tile_x}/{tile_y}.png'
+            )
+
+            try:
+                response = http_get(
+                    tile_url,
+                    headers={
+                        'Accept':
+                            'image/png,*/*'
+                    },
+                    timeout=(
+                        5,
+                        18,
+                    ),
+                )
+
+                tile = Image.open(
+                    io.BytesIO(
+                        response.content
+                    )
+                ).convert(
+                    'RGBA'
+                )
+
+                if tile.size != (
+                    256,
+                    256,
+                ):
+                    tile = tile.resize(
+                        (
+                            256,
+                            256,
+                        ),
+                        Image.Resampling.BILINEAR,
+                    )
+
+                mosaic.alpha_composite(
+                    tile,
+                    dest=(
+                        (tile_x - tile_x0) * 256,
+                        (tile_y - tile_y0) * 256,
+                    ),
+                )
+                got_tile = True
+
+            except Exception:
+                continue
+
+    if not got_tile:
+        raise RetryableSourceDataError(
+            'IEM timestamped N0Q tiles were unavailable'
+        )
+
+    crop_left = int(round(left_world - tile_x0 * 256.0))
+    crop_top = int(round(top_world - tile_y0 * 256.0))
+    crop_right = int(round(right_world - tile_x0 * 256.0))
+    crop_bottom = int(round(bottom_world - tile_y0 * 256.0))
+
+    crop_left = max(0, min(mosaic.width - 1, crop_left))
+    crop_top = max(0, min(mosaic.height - 1, crop_top))
+    crop_right = max(crop_left + 1, min(mosaic.width, crop_right))
+    crop_bottom = max(crop_top + 1, min(mosaic.height, crop_bottom))
+
+    out = mosaic.crop(
+        (
+            crop_left,
+            crop_top,
+            crop_right,
+            crop_bottom,
+        )
+    ).resize(
+        (
+            width,
+            height,
+        ),
+        Image.Resampling.BILINEAR,
+    )
+
+    if not iem_radar_overlay_has_pixels(out):
+        raise RetryableSourceDataError(
+            'IEM timestamped N0Q tiles contained no rendered pixels'
+        )
+
+    return out
+
+
 def fetch_iem_n0q_overlay(
     bbox: tuple[
         float,
@@ -3477,8 +3738,9 @@ def fetch_iem_n0q_overlay(
 
     last_error: Optional[Exception] = None
 
-    # Prefer the frame at or immediately before issuance.  The additional
-    # attempts handle the uncommon case where one 5-minute mosaic is late.
+    # Prefer the frame at or immediately before issuance.  First try IEM's
+    # WMS-T endpoint; when it returns an empty/transparent frame, use the
+    # timestamped IEM N0Q tile archive for the exact same time.
     for minutes_back in (
         0,
         5,
@@ -3535,8 +3797,8 @@ def fetch_iem_n0q_overlay(
                         'image/png,*/*'
                 },
                 timeout=(
-                    8,
-                    45,
+                    5,
+                    20,
                 ),
             )
 
@@ -3560,8 +3822,38 @@ def fetch_iem_n0q_overlay(
                     Image.Resampling.BILINEAR,
                 )
 
+            if iem_radar_overlay_has_pixels(
+                image
+            ):
+                log.info(
+                    'IEM N0Q WMS frame %s selected',
+                    candidate.strftime(
+                        '%Y-%m-%dT%H:%MZ'
+                    ),
+                )
+
+                return image
+
             log.info(
-                'IEM N0Q radar frame %s selected',
+                'IEM N0Q WMS frame %s was blank; trying timestamped tiles',
+                candidate.strftime(
+                    '%Y-%m-%dT%H:%MZ'
+                ),
+            )
+
+        except Exception as exc:
+            last_error = exc
+
+        try:
+            image = fetch_iem_n0q_tms_overlay(
+                bbox,
+                width,
+                height,
+                candidate,
+            )
+
+            log.info(
+                'IEM N0Q tile frame %s selected',
                 candidate.strftime(
                     '%Y-%m-%dT%H:%MZ'
                 ),
@@ -8049,6 +8341,348 @@ def build_mapbox_wpc_ero_map(
     )
 
 
+def spc_latlon_polygon_geometry(
+    text: str,
+) -> dict[str, Any]:
+    match = re.search(
+        r'(?is)\bLAT\.\.\.LON\s+'
+        r'(.+?)'
+        r'(?='
+        r'\n\s*(?:'
+        r'MOST\s+PROBABLE|'
+        r'ATTN\.\.\.|'
+        r'&&|'
+        r'\$\$'
+        r')'
+        r'|$'
+        r')',
+        text,
+    )
+
+    if not match:
+        return {}
+
+    tokens = re.findall(
+        r'\b\d{8}\b',
+        match.group(
+            1
+        ),
+    )
+
+    ring: list[list[float]] = []
+
+    for token in tokens:
+        try:
+            lat = int(
+                token[:4]
+            ) / 100.0
+
+            lon_value = int(
+                token[4:]
+            ) / 100.0
+
+            # SPC's compact LAT...LON convention drops the leading 1 for
+            # western longitudes >= 100W (e.g. 1123 means 111.23W when
+            # paired in the standard 8-digit MCD token convention).
+            if lon_value < 40.0:
+                lon_value += 100.0
+
+            lon = -lon_value
+
+        except Exception:
+            continue
+
+        if not (
+            15.0 <= lat <= 75.0
+            and
+            -180.0 <= lon <= -50.0
+        ):
+            continue
+
+        ring.append(
+            [
+                lon,
+                lat,
+            ]
+        )
+
+    if len(ring) < 3:
+        return {}
+
+    if ring[0] != ring[-1]:
+        ring.append(
+            list(
+                ring[0]
+            )
+        )
+
+    return {
+        'rings': [
+            ring
+        ],
+        'spatialReference': {
+            'wkid':
+                4326
+        },
+    }
+
+
+def spc_mcd_logical_key(
+    item: RSSItem,
+) -> str:
+    _name, number = spc_product_name(
+        item,
+        'md',
+    )
+
+    issued = spc_product_issuance_datetime(
+        item.multiline_text,
+        item.published,
+    )
+
+    year = (
+        issued.year
+        if issued
+        else
+        utcnow().year
+    )
+
+    if number:
+        return sha256_text(
+            f'mcd|{year}|{int(number)}'
+        )
+
+    if issued:
+        return sha256_text(
+            f'mcd|{issued:%Y%m%d%H%M}'
+        )
+
+    return item.key
+
+
+def fetch_spc_mcd_raw_item(
+) -> Optional[RSSItem]:
+    response = http_get(
+        SPC_MCD_RAW_URL,
+        headers={
+            'Accept':
+                'text/plain,*/*',
+            'Cache-Control':
+                'no-cache',
+            'Pragma':
+                'no-cache',
+        },
+        timeout=(
+            5,
+            15,
+        ),
+    )
+
+    raw = response.text
+
+    match = re.search(
+        r'(?i)Mesoscale Discussion\s+#?\s*(\d+)',
+        raw,
+    )
+
+    if not match:
+        return None
+
+    number = match.group(
+        1
+    )
+
+    issued = spc_product_issuance_datetime(
+        raw,
+        utcnow(),
+    )
+
+    if issued is None:
+        return None
+
+    if (
+        utcnow()
+        -
+        issued
+        >
+        timedelta(
+            hours=18
+        )
+    ):
+        return None
+
+    return RSSItem(
+        title=(
+            f'Mesoscale Discussion {int(number)}'
+        ),
+        link=(
+            'https://www.spc.noaa.gov/'
+            'products/md/'
+            f'md{int(number):04d}.html'
+        ),
+        guid=(
+            f'tgftp-mcd-'
+            f'{issued:%Y}-'
+            f'{int(number):04d}'
+        ),
+        pub_date=iso_z(
+            issued
+        ),
+        description_html=(
+            '<pre>'
+            +
+            html.escape(
+                raw
+            )
+            +
+            '</pre>'
+        ),
+    )
+
+
+def poll_spc_md_fast(
+    db: StateDB,
+    x: XPublisher,
+) -> None:
+    state_source = (
+        'spc_md:direct_awips_v89'
+    )
+
+    candidates: list[RSSItem] = []
+
+    try:
+        raw_item = fetch_spc_mcd_raw_item()
+
+        if raw_item is not None:
+            candidates.append(
+                raw_item
+            )
+
+    except Exception:
+        log.exception(
+            'Direct TGFTP SPC MCD source failed; using SPC RSS fallback'
+        )
+
+    try:
+        rss_url, _kind = SPC_FEEDS[
+            'spc_md'
+        ]
+
+        candidates.extend(
+            item
+            for item
+            in fetch_rss(
+                rss_url
+            )
+            if spc_item_is_real(
+                item,
+                'md',
+            )
+        )
+
+    except Exception:
+        log.exception(
+            'SPC MCD RSS fallback failed'
+        )
+
+    by_key: dict[str, RSSItem] = {}
+
+    for item in candidates:
+        key = spc_mcd_logical_key(
+            item
+        )
+
+        existing = by_key.get(
+            key
+        )
+
+        # Prefer the fuller product text.  The direct TGFTP item normally
+        # wins and avoids waiting for the SPC HTML/GIS products.
+        if (
+            existing is None
+            or
+            len(item.multiline_text)
+            >
+            len(existing.multiline_text)
+        ):
+            by_key[
+                key
+            ] = item
+
+    prepared = sorted(
+        by_key.items(),
+        key=lambda pair:
+            pair[1].published
+            or
+            datetime(
+                1970,
+                1,
+                1,
+                tzinfo=timezone.utc,
+            ),
+    )
+
+    if not db.source_primed(
+        state_source
+    ):
+        for key, _item in prepared:
+            db.mark_seen_without_post(
+                state_source,
+                key,
+            )
+
+        db.mark_source_primed(
+            state_source
+        )
+
+        log.info(
+            'Primed %s with %d current MCD(s)',
+            state_source,
+            len(prepared),
+        )
+
+        return
+
+    for key, item in prepared:
+        current_status = db.status(
+            state_source,
+            key,
+        )
+
+        if (
+            current_status
+            and
+            current_status
+            !=
+            'rejected'
+        ):
+            continue
+
+        post: Optional[RenderedPost] = None
+
+        try:
+            post = render_spc(
+                item,
+                'md',
+            )
+
+            if not post:
+                continue
+
+            publish_once(
+                db,
+                x,
+                state_source,
+                key,
+                post,
+            )
+
+        finally:
+            cleanup_post(
+                post
+            )
+
+
 def find_matching_mcd_feature(
     number: str,
 ) -> Optional[
@@ -9254,7 +9888,21 @@ def render_spc(
         BeautifulSoup
     ] = None
 
-    if item.link:
+    embedded_mcd_geometry = (
+        kind == 'md'
+        and
+        bool(
+            spc_latlon_polygon_geometry(
+                page_text
+            )
+        )
+    )
+
+    if (
+        item.link
+        and
+        not embedded_mcd_geometry
+    ):
         try:
             page_text, soup = (
                 fetch_product_page(
@@ -9535,18 +10183,33 @@ def render_spc(
                 f'{probability.group(1)}%'
             )
 
-        match = (
-            find_matching_mcd_feature(
+        direct_geometry = spc_latlon_polygon_geometry(
+            page_text
+        )
+
+        if direct_geometry:
+            match = SPCGeometryMatch(
+                {
+                    'name':
+                        number,
+                    'source':
+                        'official_product_latlon',
+                },
+                direct_geometry,
+            )
+
+        else:
+            # GIS is only a fallback now; it is no longer allowed to delay
+            # an MCD that already contains its official LAT...LON polygon.
+            match = find_matching_mcd_feature(
                 number
             )
-        )
 
         if not match:
             raise RetryableSourceDataError(
                 f'MCD '
                 f'{number or product_name} '
-                'polygon GIS data '
-                'was not ready yet'
+                'had no usable LAT...LON polygon or GIS fallback'
             )
 
         md_issued_at = spc_product_issuance_datetime(
@@ -9939,54 +10602,120 @@ def poll_spc_convective_source(
                 )
 
 
+def poll_spc_watches(
+    db: StateDB,
+    x: XPublisher,
+) -> None:
+    source = 'spc_watches'
+    url, kind = SPC_FEEDS[
+        source
+    ]
+
+    process_rss_source(
+        db,
+        x,
+        source=source,
+        url=url,
+        item_filter=
+            lambda item:
+                spc_item_is_real(
+                    item,
+                    kind,
+                ),
+        renderer=
+            lambda item:
+                render_spc(
+                    item,
+                    kind,
+                ),
+    )
+
+
+def poll_spc_outlooks(
+    db: StateDB,
+    x: XPublisher,
+) -> None:
+    source = 'spc_convective'
+    url, _kind = SPC_FEEDS[
+        source
+    ]
+
+    poll_spc_convective_source(
+        db,
+        x,
+        source,
+        url,
+    )
+
+
+def poll_spc_fire(
+    db: StateDB,
+    x: XPublisher,
+) -> None:
+    if not ENABLE_SPC_FIRE:
+        return
+
+    source = 'spc_fire'
+    url, kind = SPC_FEEDS[
+        source
+    ]
+
+    process_rss_source(
+        db,
+        x,
+        source=source,
+        url=url,
+        item_filter=
+            lambda item:
+                spc_item_is_real(
+                    item,
+                    kind,
+                ),
+        renderer=
+            lambda item:
+                render_spc(
+                    item,
+                    kind,
+                ),
+    )
+
+
 def poll_spc(
     db: StateDB,
     x: XPublisher,
 ) -> None:
-    for source, (
-        url,
-        kind,
-    ) in SPC_FEEDS.items():
+    # Compatibility dispatcher.  The scheduler runs these independently so a
+    # slow outlook/GIS request can never hold up a new MCD or watch.
+    for name, func in (
+        (
+            'md',
+            poll_spc_md_fast,
+        ),
+        (
+            'watch',
+            poll_spc_watches,
+        ),
+        (
+            'outlook',
+            poll_spc_outlooks,
+        ),
+        (
+            'fire',
+            poll_spc_fire,
+        ),
+    ):
         try:
-            if kind == 'convective':
-                poll_spc_convective_source(
-                    db,
-                    x,
-                    source,
-                    url,
-                )
-
-                continue
-
-            process_rss_source(
+            func(
                 db,
                 x,
-                source=source,
-                url=url,
-                item_filter=
-                    lambda item, k=kind:
-                        spc_item_is_real(
-                            item,
-                            k,
-                        ),
-                renderer=
-                    lambda item, k=kind:
-                        render_spc(
-                            item,
-                            k,
-                        ),
             )
 
         except Exception:
             log.exception(
-                'SPC source failed: %s',
-                source,
+                'SPC %s source failed',
+                name,
             )
 
-
-# ---------------------------------------------------------------------------
-# Everything below this point is unchanged from the v8.6 file you supplied.
-# ---------------------------------------------------------------------------
 
 def build_nhc_basin_sources(
     basin: str,
@@ -11516,6 +12245,82 @@ def nhc_arcgis_geometry_points(
                     pass
 
     return points
+
+
+def nhc_export_summary_overlay(
+    bbox: tuple[
+        float,
+        float,
+        float,
+        float,
+    ],
+    width: int,
+    height: int,
+    layers: tuple[int, ...],
+    *,
+    layer_where: str = '',
+) -> Image.Image:
+    params: dict[str, Any] = {
+        'bbox':
+            ','.join(
+                f'{value:.3f}'
+                for value
+                in bbox
+            ),
+        'bboxSR':
+            '3857',
+        'imageSR':
+            '3857',
+        'size':
+            f'{width},{height}',
+        'format':
+            'png32',
+        'transparent':
+            'true',
+        'layers':
+            'show:'
+            +
+            ','.join(
+                str(layer)
+                for layer
+                in layers
+            ),
+        'f':
+            'image',
+    }
+
+    if layer_where:
+        params[
+            'layerDefs'
+        ] = json.dumps(
+            {
+                str(layer):
+                    layer_where
+                for layer
+                in layers
+            }
+        )
+
+    response = http_get(
+        f'{NHC_TROPICAL_MAPSERVER}/export',
+        params=params,
+        headers={
+            'Accept':
+                'image/png,*/*'
+        },
+        timeout=(
+            8,
+            45,
+        ),
+    )
+
+    return Image.open(
+        io.BytesIO(
+            response.content
+        )
+    ).convert(
+        'RGBA'
+    )
 
 
 def nhc_probability_features(
@@ -13277,10 +14082,8 @@ def nhc_select_forecast_group(
     str,
     str,
 ]:
-    _storm_type, storm_name = (
-        nhc_storm_identity(
-            item
-        )
+    _storm_type, storm_name = nhc_storm_identity(
+        item
     )
 
     if not storm_name:
@@ -13298,10 +14101,7 @@ def nhc_select_forecast_group(
         out_sr=3857,
     )
 
-    groups: dict[
-        str,
-        list[dict[str, Any]],
-    ] = {}
+    groups: dict[str, list[dict[str, Any]]] = {}
 
     for feature in features:
         attrs = (
@@ -13311,14 +14111,6 @@ def nhc_select_forecast_group(
             or
             {}
         )
-
-        if not nhc_basin_matches(
-            attrs.get(
-                'basin'
-            ),
-            basin,
-        ):
-            continue
 
         group_key = squish(
             str(
@@ -13351,20 +14143,17 @@ def nhc_select_forecast_group(
             '',
         )
 
-    current_lon, current_lat = (
-        nhc_lonlat_from_text(
-            item.multiline_text
-        )
+    current_lon, current_lat = nhc_lonlat_from_text(
+        item.multiline_text
     )
 
-    wanted_name = (
-        nhc_normalized_storm_token(
-            storm_name
-        )
+    wanted_name = nhc_normalized_storm_token(
+        storm_name
     )
 
     ranked: list[
         tuple[
+            int,
             int,
             float,
             float,
@@ -13381,11 +14170,9 @@ def nhc_select_forecast_group(
             {}
         )
 
-        candidate_name = (
-            nhc_normalized_storm_token(
-                attrs.get(
-                    'stormname'
-                )
+        candidate_name = nhc_normalized_storm_token(
+            attrs.get(
+                'stormname'
             )
         )
 
@@ -13408,6 +14195,18 @@ def nhc_select_forecast_group(
 
         if name_rank == 0:
             continue
+
+        basin_rank = (
+            1
+            if nhc_basin_matches(
+                attrs.get(
+                    'basin'
+                ),
+                basin,
+            )
+            else
+            0
+        )
 
         latest_ingest = 0.0
 
@@ -13443,9 +14242,7 @@ def nhc_select_forecast_group(
                         value
                     )
                     numeric = (
-                        dt.timestamp()
-                        *
-                        1000.0
+                        dt.timestamp() * 1000.0
                         if dt
                         else
                         0.0
@@ -13456,17 +14253,16 @@ def nhc_select_forecast_group(
                     numeric,
                 )
 
-        distance_score = (
-            nhc_feature_distance_score(
-                group,
-                current_lon,
-                current_lat,
-            )
+        distance_score = nhc_feature_distance_score(
+            group,
+            current_lon,
+            current_lat,
         )
 
         ranked.append(
             (
                 name_rank,
+                basin_rank,
                 latest_ingest,
                 distance_score,
                 group_key,
@@ -13484,7 +14280,7 @@ def nhc_select_forecast_group(
         reverse=True
     )
 
-    best_key = ranked[0][3]
+    best_key = ranked[0][4]
     selected = groups.get(
         best_key,
         [],
@@ -14734,11 +15530,306 @@ def poll_nhc_two_source(
             )
 
 
+def nhc_hydrate_product_item(
+    item: RSSItem,
+) -> RSSItem:
+    raw = item.multiline_text
+
+    # Wallet RSS descriptions usually contain the full product.  Basin-wide
+    # dynamic feeds sometimes only carry a short summary, so fetch the linked
+    # official product page only when needed.
+    if (
+        len(raw) >= 500
+        and
+        (
+            'LOCATION' in raw.upper()
+            or
+            'FORECAST POSITIONS' in raw.upper()
+            or
+            'MAXIMUM SUSTAINED' in raw.upper()
+            or
+            'DISCUSSION' in raw.upper()
+        )
+    ):
+        return item
+
+    if not item.link:
+        return item
+
+    try:
+        page_text, _soup = fetch_nhc_product_page(
+            item.link
+        )
+
+    except Exception:
+        return item
+
+    if len(page_text) <= len(raw):
+        return item
+
+    return RSSItem(
+        title=item.title,
+        link=item.link,
+        guid=item.guid,
+        pub_date=item.pub_date,
+        description_html=(
+            '<pre>'
+            +
+            html.escape(
+                page_text
+            )
+            +
+            '</pre>'
+        ),
+    )
+
+
+def nhc_basin_item_kind(
+    item: RSSItem,
+) -> str:
+    combined = (
+        f'{item.title}\n{item.multiline_text}'
+    ).lower()
+
+    if 'tropical cyclone update' in combined:
+        return 'tcu'
+
+    if 'forecast discussion' in combined:
+        return 'tcd'
+
+    if (
+        'forecast/advisory' in combined
+        or
+        'forecast advisory' in combined
+    ):
+        return 'tcm'
+
+    if (
+        'public advisory' in combined
+        or
+        'intermediate advisory' in combined
+        or
+        re.search(
+            r'\badvisory\s+number\b',
+            combined,
+        )
+    ):
+        return 'tcp'
+
+    return ''
+
+
+def nhc_product_logical_key(
+    item: RSSItem,
+    kind: str,
+    basin: str,
+) -> str:
+    raw = item.multiline_text
+    storm = (
+        nhc_storm_name(
+            item
+        )
+        or
+        squish(
+            item.title
+        )
+    )
+
+    advisory = ''
+    match = re.search(
+        r'(?i)ADVISORY\s+NUMBER\s+([0-9]+[A-Z]?)',
+        raw,
+    )
+
+    if match:
+        advisory = match.group(
+            1
+        ).upper()
+
+    wmo_stamp = ''
+    match = re.search(
+        r'(?im)^\s*[A-Z]{4}\d{2}\s+[A-Z]{4}\s+(\d{6})\b',
+        raw,
+    )
+
+    if match:
+        wmo_stamp = match.group(
+            1
+        )
+
+    published = (
+        item.published.strftime(
+            '%Y%m%d%H%M'
+        )
+        if item.published
+        else
+        ''
+    )
+
+    identity = '|'.join(
+        (
+            'nhc',
+            basin,
+            kind,
+            nhc_normalized_storm_token(
+                storm
+            ),
+            advisory,
+            wmo_stamp,
+            published,
+        )
+    )
+
+    return sha256_text(
+        identity
+    )
+
+
+def poll_nhc_basin_feed(
+    db: StateDB,
+    x: XPublisher,
+    basin: str,
+    url: str,
+) -> None:
+    items = fetch_rss(
+        url
+    )
+
+    prepared: list[
+        tuple[
+            str,
+            RSSItem,
+            str,
+        ]
+    ] = []
+
+    for item in items:
+        if not nhc_item_is_real(
+            item
+        ):
+            continue
+
+        kind = nhc_basin_item_kind(
+            item
+        )
+
+        if not kind:
+            continue
+
+        key = nhc_product_logical_key(
+            item,
+            kind,
+            basin,
+        )
+
+        prepared.append(
+            (
+                key,
+                item,
+                kind,
+            )
+        )
+
+    state_source = (
+        f'nhc_basin_products_v89:{basin}'
+    )
+
+    if not db.source_primed(
+        state_source
+    ):
+        for key, _item, _kind in prepared:
+            db.mark_seen_without_post(
+                state_source,
+                key,
+            )
+
+        db.mark_source_primed(
+            state_source
+        )
+
+        log.info(
+            'Primed %s with %d current NHC basin product(s)',
+            state_source,
+            len(prepared),
+        )
+
+        return
+
+    prepared.sort(
+        key=lambda row:
+            row[1].published
+            or
+            datetime(
+                1970,
+                1,
+                1,
+                tzinfo=timezone.utc,
+            )
+    )
+
+    for key, item, kind in prepared:
+        current_status = db.status(
+            state_source,
+            key,
+        )
+
+        if (
+            current_status
+            and
+            current_status
+            !=
+            'rejected'
+        ):
+            continue
+
+        post: Optional[RenderedPost] = None
+
+        try:
+            post = render_nhc_storm(
+                item,
+                kind,
+                basin,
+            )
+
+            if not post:
+                db.mark_seen_without_post(
+                    state_source,
+                    key,
+                    status='ignored',
+                )
+                continue
+
+            publish_once(
+                db,
+                x,
+                state_source,
+                key,
+                post,
+            )
+
+        except RetryableSourceDataError as exc:
+            log.info(
+                'Deferred %s %s while waiting for a complete official map: %s',
+                state_source,
+                key[:16],
+                exc,
+            )
+
+        finally:
+            cleanup_post(
+                post
+            )
+
+
 def render_nhc_storm(
     item: RSSItem,
     kind: str,
     basin: str,
 ) -> Optional[RenderedPost]:
+    item = nhc_hydrate_product_item(
+        item
+    )
+
     raw = (
         item.multiline_text
     )
@@ -14883,6 +15974,11 @@ def render_nhc_storm(
                 storm_label,
             )
 
+    if not image_path:
+        raise RetryableSourceDataError(
+            f'NHC {storm_label} {product} has no complete official map yet'
+        )
+
     return RenderedPost(
         fit_post(
             [
@@ -15015,9 +16111,8 @@ def poll_nhc(
     db: StateDB,
     x: XPublisher,
 ) -> None:
-    for source, url in (
-        NHC_TWO_FEEDS.items()
-    ):
+    # Tropical Weather Outlook disturbances remain separate per-system posts.
+    for source, url in NHC_TWO_FEEDS.items():
         try:
             poll_nhc_two_source(
                 db,
@@ -15028,125 +16123,40 @@ def poll_nhc(
 
         except Exception:
             log.exception(
-                'NHC Tropical Weather '
-                'Outlook source failed: %s',
+                'NHC Tropical Weather Outlook source failed: %s',
                 source,
             )
 
-    now_ts = int(
-        time.time()
-    )
-
-    for basin, index_url in (
-        NHC_BASIN_INDEX_FEEDS.items()
-    ):
-        fp_key = (
-            f'nhc:index-fingerprint:'
-            f'{basin}'
-        )
-
-        sweep_key = (
-            f'nhc:last-full-sweep:'
-            f'{basin}'
-        )
-
+    # The official basin-wide dynamic feeds cover Atlantic, Eastern Pacific,
+    # and Central Pacific active-cyclone text products.  Polling them directly
+    # avoids waiting for the old index-fingerprint -> wallet sweep chain.
+    for basin, index_url in NHC_BASIN_INDEX_FEEDS.items():
         try:
-            fingerprint = (
-                nhc_index_fingerprint(
-                    index_url
-                )
+            poll_nhc_basin_feed(
+                db,
+                x,
+                basin,
+                index_url,
             )
-
-            old_fingerprint = (
-                db.get_meta(
-                    fp_key
-                )
-            )
-
-            try:
-                last_sweep = int(
-                    db.get_meta(
-                        sweep_key,
-                        '0',
-                    )
-                    or
-                    '0'
-                )
-
-            except ValueError:
-                last_sweep = 0
-
-            changed = (
-                not
-                old_fingerprint
-                or
-                fingerprint
-                !=
-                old_fingerprint
-            )
-
-            due = (
-                now_ts
-                -
-                last_sweep
-                >=
-                NHC_FULL_SWEEP_SECONDS
-            )
-
-            if (
-                changed
-                or
-                due
-            ):
-                log.info(
-                    'NHC %s product '
-                    'sweep (%s)',
-                    basin,
-                    (
-                        'index changed'
-                        if changed
-                        else
-                        'safety sweep'
-                    ),
-                )
-
-                if nhc_sweep_basin(
-                    db,
-                    x,
-                    basin,
-                ):
-                    db.set_meta(
-                        sweep_key,
-                        str(
-                            now_ts
-                        ),
-                    )
-
-                    db.set_meta(
-                        fp_key,
-                        fingerprint,
-                    )
-
-                else:
-                    log.warning(
-                        'NHC %s sweep '
-                        'incomplete; '
-                        'retrying next cycle',
-                        basin,
-                    )
-
-            else:
-                db.set_meta(
-                    fp_key,
-                    fingerprint,
-                )
 
         except Exception:
             log.exception(
-                'NHC basin index/'
-                'sweep failed: %s',
+                'NHC dynamic basin feed failed for %s; trying wallet fallback',
                 basin,
             )
+
+            try:
+                nhc_sweep_basin(
+                    db,
+                    x,
+                    basin,
+                )
+
+            except Exception:
+                log.exception(
+                    'NHC wallet fallback also failed for %s',
+                    basin,
+                )
 
 
 def fetch_nws_alerts_since(
@@ -17907,12 +18917,18 @@ def main() -> int:
     log.info(
         'Intervals: '
         'NWS=%ss '
-        'SPC=%ss '
+        'SPC_MD=%ss '
+        'SPC_WATCH=%ss '
+        'SPC_OUTLOOK=%ss '
+        'SPC_FIRE=%ss '
         'NHC=%ss '
         'WPC_ERO=%ss '
         'WPC_WINTER=%ss',
         NWS_POLL_SECONDS,
-        SPC_POLL_SECONDS,
+        SPC_MD_POLL_SECONDS,
+        SPC_WATCH_POLL_SECONDS,
+        SPC_OUTLOOK_POLL_SECONDS,
+        SPC_FIRE_POLL_SECONDS,
         NHC_POLL_SECONDS,
         WPC_ERO_POLL_SECONDS,
         WPC_WINTER_POLL_SECONDS,
@@ -17959,9 +18975,24 @@ def main() -> int:
             poll_nws_alerts,
         ),
         Job(
-            'spc',
-            SPC_POLL_SECONDS,
-            poll_spc,
+            'spc_md',
+            SPC_MD_POLL_SECONDS,
+            poll_spc_md_fast,
+        ),
+        Job(
+            'spc_watch',
+            SPC_WATCH_POLL_SECONDS,
+            poll_spc_watches,
+        ),
+        Job(
+            'spc_outlook',
+            SPC_OUTLOOK_POLL_SECONDS,
+            poll_spc_outlooks,
+        ),
+        Job(
+            'spc_fire',
+            SPC_FIRE_POLL_SECONDS,
+            poll_spc_fire,
         ),
         Job(
             'nhc',

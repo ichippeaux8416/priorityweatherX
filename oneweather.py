@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-27-watch-radar-v8.11'
+BUILD_ID = '2026-08-27-watch-updates-clean-nhc-v8.12'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -123,6 +123,15 @@ SPC_WATCH_WWP_URL_TEMPLATE = (
     'https://tgftp.nws.noaa.gov/'
     'data/raw/ww/'
     'wwus40.kwns.wwp.{slot}.txt'
+)
+
+# The Watch Outline Update (WOU) is the authoritative current watch-area
+# update.  Unlike the original SAW, it is refreshed as counties are trimmed
+# and includes the local issue/update clock used for display and radar time.
+SPC_WATCH_WOU_URL_TEMPLATE = (
+    'https://tgftp.nws.noaa.gov/'
+    'data/raw/wo/'
+    'wous64.kwns.wou.{slot}.txt'
 )
 
 NHC_TWO_FEEDS = {
@@ -8977,6 +8986,27 @@ def fetch_spc_watch_saw_feature(
         'event': target,
     }
 
+
+    saw_states_match = re.search(
+        r'(?im)^\s*WW\s+0*'
+        + re.escape(target)
+        + r'\s+(?:TORNADO|SEVERE\s+TSTM)\s+'
+        r'([A-Z ]+?)\s+\d{6}Z\s*-',
+        raw,
+    )
+
+    if saw_states_match:
+        state_names = [
+            US_STATE_NAMES[code]
+            for code in saw_states_match.group(1).split()
+            if code in US_STATE_NAMES
+        ]
+
+        if state_names:
+            attrs['saw_location'] = ', '.join(
+                state_names
+            )
+
     issued_at = spc_product_issuance_datetime(
         raw,
         utcnow(),
@@ -9015,6 +9045,161 @@ def fetch_spc_watch_saw_feature(
         geometry,
     )
 
+
+
+US_STATE_NAMES = {
+    'AL': 'Alabama', 'AK': 'Alaska', 'AZ': 'Arizona', 'AR': 'Arkansas',
+    'CA': 'California', 'CO': 'Colorado', 'CT': 'Connecticut', 'DE': 'Delaware',
+    'FL': 'Florida', 'GA': 'Georgia', 'HI': 'Hawaii', 'ID': 'Idaho',
+    'IL': 'Illinois', 'IN': 'Indiana', 'IA': 'Iowa', 'KS': 'Kansas',
+    'KY': 'Kentucky', 'LA': 'Louisiana', 'ME': 'Maine', 'MD': 'Maryland',
+    'MA': 'Massachusetts', 'MI': 'Michigan', 'MN': 'Minnesota', 'MS': 'Mississippi',
+    'MO': 'Missouri', 'MT': 'Montana', 'NE': 'Nebraska', 'NV': 'Nevada',
+    'NH': 'New Hampshire', 'NJ': 'New Jersey', 'NM': 'New Mexico', 'NY': 'New York',
+    'NC': 'North Carolina', 'ND': 'North Dakota', 'OH': 'Ohio', 'OK': 'Oklahoma',
+    'OR': 'Oregon', 'PA': 'Pennsylvania', 'RI': 'Rhode Island',
+    'SC': 'South Carolina', 'SD': 'South Dakota', 'TN': 'Tennessee', 'TX': 'Texas',
+    'UT': 'Utah', 'VT': 'Vermont', 'VA': 'Virginia', 'WA': 'Washington',
+    'WV': 'West Virginia', 'WI': 'Wisconsin', 'WY': 'Wyoming', 'DC': 'District of Columbia',
+}
+
+
+def spc_watch_states_from_wou(
+    raw: str,
+) -> list[str]:
+    states: list[str] = []
+
+    for match in re.finditer(
+        r'(?im)^\s*\.\s*'
+        r'([A-Z][A-Z ]+?)\s+'
+        r'(?:COUNTIES|PARISHES|INDEPENDENT CITIES)\s+'
+        r'INCLUDED ARE\s*$',
+        raw,
+    ):
+        name = squish(
+            match.group(1)
+        ).title()
+
+        if (
+            name
+            and
+            name not in states
+        ):
+            states.append(name)
+
+    # Some WOU variants can be very compact.  If the verbose headings are
+    # absent, recover the state postal prefixes from the UGC blocks.
+    if not states:
+        codes: list[str] = []
+
+        for code in re.findall(
+            r'(?im)^\s*([A-Z]{2})[CZ]\d{3}(?:-|\b)',
+            raw,
+        ):
+            code = code.upper()
+
+            if (
+                code in US_STATE_NAMES
+                and
+                code not in codes
+            ):
+                codes.append(code)
+
+        states = [
+            US_STATE_NAMES[code]
+            for code in codes
+        ]
+
+    return states
+
+
+def fetch_spc_watch_wou_update(
+    number: str,
+) -> dict[str, Any]:
+    target = digits_only(
+        number
+    ).lstrip('0')
+
+    if not target:
+        return {}
+
+    slot = int(target) % 10
+    url = SPC_WATCH_WOU_URL_TEMPLATE.format(
+        slot=slot
+    )
+
+    try:
+        raw = http_get(
+            url,
+            headers={
+                'Accept': 'text/plain,*/*',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+            },
+            timeout=(5, 15),
+        ).text
+
+    except Exception:
+        return {}
+
+    number_match = re.search(
+        r'(?i)\b(?:TORNADO|SEVERE THUNDERSTORM)\s+'
+        r'WATCH(?:\s+OUTLINE\s+UPDATE\s+FOR\s+W[ST])?\s*'
+        r'0*(\d{1,4})\b',
+        raw,
+    )
+
+    if not number_match:
+        number_match = re.search(
+            r'(?i)\bWATCH\s+0*(\d{1,4})\s+IS\s+',
+            raw,
+        )
+
+    if (
+        not number_match
+        or
+        number_match.group(1).lstrip('0') != target
+    ):
+        return {}
+
+    updated_at = spc_product_issuance_datetime(
+        raw,
+        utcnow(),
+    )
+
+    local_clock = find_local_issue_clock(
+        raw
+    )
+
+    expires_clock = ''
+    expires_match = re.search(
+        r'(?i)\bWATCH\s+0*'
+        + re.escape(target)
+        + r'\s+IS\s+IN\s+EFFECT\s+UNTIL\s+'
+        r'(\d{1,4}\s+(?:AM|PM)\s+[A-Z]{2,5})\b',
+        raw,
+    )
+
+    if expires_match:
+        expires_clock = squish(
+            expires_match.group(1)
+        ).upper()
+
+    states = spc_watch_states_from_wou(
+        raw
+    )
+
+    return {
+        'raw': raw,
+        'updated': (
+            iso_z(updated_at)
+            if updated_at is not None
+            else ''
+        ),
+        'local_clock': local_clock,
+        'expires_clock': expires_clock,
+        'location': ', '.join(states),
+    }
 
 def find_matching_watch_feature(
     product_name: str,
@@ -10537,9 +10722,10 @@ def render_spc(
             )
 
     elif kind == 'watch':
-        # Do not wait on the downstream WWA ArcGIS layer.  SPC's SAW raw
-        # product carries the official watch-box LAT...LON coordinates at
-        # issuance; GIS remains only a fallback for the exact county union.
+        # Use the original fast SAW polygon first.  The WOU is separately
+        # consulted for the *current update time/location*, because watch
+        # updates can arrive hours after the original issuance while keeping
+        # the same watch number and expiration.
         match = fetch_spc_watch_saw_feature(
             number
         )
@@ -10559,6 +10745,35 @@ def render_spc(
                 'had no usable SAW polygon or GIS fallback yet'
             )
 
+        watch_update = fetch_spc_watch_wou_update(
+            number
+        )
+
+        if (
+            not location
+            or
+            location.strip().lower() == 'united states'
+        ):
+            location = squish(
+                str(
+                    watch_update.get(
+                        'location'
+                    )
+                    or
+                    match.attributes.get(
+                        'saw_location'
+                    )
+                    or
+                    ''
+                )
+            )
+
+        # Never print the meaningless generic fallback for a watch.  If both
+        # public-text parsing and WOU/SAW state extraction fail, omit location
+        # rather than claiming the watch covers "United States".
+        if location.strip().lower() == 'united states':
+            location = ''
+
         probabilities = (
             fetch_watch_probabilities(
                 number
@@ -10571,73 +10786,7 @@ def render_spc(
             )
         )
 
-        zone_match = re.search(
-            r'\b([ECMPAH][DS]T)\b',
-            issued
-            or
-            '',
-        )
-
-        zone = (
-            zone_match.group(
-                1
-            )
-            if
-            zone_match
-            else
-            'UTC'
-        )
-
-        if not issued:
-            issued_from_gis = (
-                format_datetime_in_abbrev(
-                    match.attributes.get(
-                        'issuance'
-                    ),
-                    zone,
-                )
-            )
-
-            if issued_from_gis:
-                issued = (
-                    issued_from_gis
-                )
-
-        if not expires:
-            expires_from_gis = (
-                format_datetime_in_abbrev(
-                    match.attributes.get(
-                        'expiration'
-                    )
-                    or
-                    match.attributes.get(
-                        'ends'
-                    ),
-                    zone,
-                )
-            )
-
-            if expires_from_gis:
-                expires = (
-                    expires_from_gis
-                )
-
-        if (
-            issued
-            and
-            expires
-        ):
-            time_line = (
-                f'Issued {issued} '
-                f'Expires {expires}'
-            )
-
-        elif issued:
-            time_line = (
-                f'Issued {issued}'
-            )
-
-        watch_issued_at = (
+        original_issued_at = (
             arcgis_datetime(
                 match.attributes.get(
                     'issuance'
@@ -10650,10 +10799,154 @@ def render_spc(
             )
         )
 
+        wou_updated_at = arcgis_datetime(
+            watch_update.get(
+                'updated'
+            )
+        )
+
+        # An RSS/WOU update should show and image the conditions at the update
+        # time, not at the original watch issuance.  The WOU timestamp wins;
+        # RSS publication time is a fallback if it is clearly later than SAW.
+        display_at = original_issued_at
+        is_update = False
+
+        if (
+            wou_updated_at is not None
+            and
+            original_issued_at is not None
+            and
+            wou_updated_at
+            >
+            original_issued_at
+            +
+            timedelta(minutes=2)
+        ):
+            display_at = wou_updated_at
+            is_update = True
+
+        elif (
+            item.published is not None
+            and
+            original_issued_at is not None
+            and
+            item.published
+            >
+            original_issued_at
+            +
+            timedelta(minutes=5)
+        ):
+            display_at = item.published
+            is_update = True
+
+        zone_candidates = ' '.join(
+            value
+            for value in (
+                str(
+                    watch_update.get(
+                        'local_clock'
+                    )
+                    or
+                    ''
+                ),
+                issued,
+                expires,
+                page_text[:1500],
+            )
+            if value
+        )
+
+        zone_match = re.search(
+            r'\b([ECMPAH][DS]T)\b',
+            zone_candidates,
+            re.I,
+        )
+
+        zone = (
+            zone_match.group(1).upper()
+            if zone_match
+            else 'UTC'
+        )
+
+        if is_update:
+            update_clock = squish(
+                str(
+                    watch_update.get(
+                        'local_clock'
+                    )
+                    or
+                    ''
+                )
+            )
+
+            if not update_clock and display_at is not None:
+                update_clock = format_datetime_in_abbrev(
+                    display_at,
+                    zone,
+                )
+
+            issued = update_clock
+
+        elif not issued and display_at is not None:
+            issued = format_datetime_in_abbrev(
+                display_at,
+                zone,
+            )
+
+        update_expires = squish(
+            str(
+                watch_update.get(
+                    'expires_clock'
+                )
+                or
+                ''
+            )
+        )
+
+        if update_expires:
+            expires = update_expires
+
+        elif not expires:
+            expires_from_source = (
+                format_datetime_in_abbrev(
+                    match.attributes.get(
+                        'expiration'
+                    )
+                    or
+                    match.attributes.get(
+                        'ends'
+                    ),
+                    zone,
+                )
+            )
+
+            if expires_from_source:
+                expires = expires_from_source
+
+        verb = (
+            'Updated'
+            if is_update
+            else 'Issued'
+        )
+
+        if issued and expires:
+            time_line = (
+                f'{verb} {issued} '
+                f'Expires {expires}'
+            )
+
+        elif issued:
+            time_line = (
+                f'{verb} {issued}'
+            )
+
+        # Most important behavior change: radar time follows the WOU/RSS
+        # update.  A trimmed/updated watch therefore shows current radar, while
+        # a brand-new watch still shows radar at initial issuance.
         image_path = (
             build_watch_image(
                 match,
-                watch_issued_at,
+                display_at,
             )
         )
 
@@ -14717,15 +15010,687 @@ def nhc_knots_to_mph(
     )
 
 
-def nhc_draw_named_wind_labels(
+def nhc_normalize_advisory_token(
+    value: Any,
+) -> str:
+    text = squish(
+        str(
+            value
+            or
+            ''
+        )
+    ).upper()
+
+    match = re.search(
+        r'(\d+)([A-Z]?)',
+        text,
+    )
+
+    if not match:
+        return text
+
+    return (
+        str(
+            int(
+                match.group(1)
+            )
+        )
+        +
+        match.group(2)
+    )
+
+
+def nhc_feature_latest_time(
+    features: list[dict[str, Any]],
+) -> float:
+    latest = 0.0
+
+    for feature in features:
+        attrs = (
+            feature.get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        for key in (
+            'idp_ingestdate',
+            'idp_filedate',
+        ):
+            value = attrs.get(
+                key
+            )
+
+            if value in (
+                None,
+                '',
+            ):
+                continue
+
+            dt = arcgis_datetime(
+                value
+            )
+
+            if dt is not None:
+                latest = max(
+                    latest,
+                    dt.timestamp(),
+                )
+
+    return latest
+
+
+def nhc_select_related_forecast_layer(
+    layer: int,
+    *,
+    gis_source: str,
+    storm_name: str,
+    basin: str,
+    advisory_number: str,
+) -> list[dict[str, Any]]:
+    features = arcgis_query_features(
+        NHC_TROPICAL_MAPSERVER,
+        layer,
+        out_fields='*',
+        return_geometry=True,
+        out_sr=3857,
+    )
+
+    if not features:
+        return []
+
+    target_source = squish(
+        gis_source
+    ).upper()
+
+    target_wallet = (
+        target_source[:3]
+        if len(target_source) >= 3
+        else target_source
+    )
+
+    target_name = nhc_normalized_storm_token(
+        storm_name
+    )
+
+    target_advisory = nhc_normalize_advisory_token(
+        advisory_number
+    )
+
+    groups: dict[
+        str,
+        list[dict[str, Any]],
+    ] = {}
+
+    for feature in features:
+        attrs = (
+            feature.get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        source = squish(
+            str(
+                attrs.get(
+                    'idp_source'
+                )
+                or
+                ''
+            )
+        ).upper()
+
+        name = nhc_normalized_storm_token(
+            attrs.get(
+                'stormname'
+            )
+        )
+
+        advisory = nhc_normalize_advisory_token(
+            attrs.get(
+                'advisnum'
+            )
+        )
+
+        group_key = (
+            source
+            or
+            f'{name}|{advisory}'
+        )
+
+        groups.setdefault(
+            group_key,
+            [],
+        ).append(
+            feature
+        )
+
+    ranked: list[
+        tuple[
+            int,
+            float,
+            str,
+        ]
+    ] = []
+
+    for group_key, group in groups.items():
+        attrs = (
+            group[0].get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        source = squish(
+            str(
+                attrs.get(
+                    'idp_source'
+                )
+                or
+                ''
+            )
+        ).upper()
+
+        source_wallet = (
+            source[:3]
+            if len(source) >= 3
+            else source
+        )
+
+        name = nhc_normalized_storm_token(
+            attrs.get(
+                'stormname'
+            )
+        )
+
+        advisory = nhc_normalize_advisory_token(
+            attrs.get(
+                'advisnum'
+            )
+        )
+
+        score = 0
+
+        if (
+            target_source
+            and
+            source == target_source
+        ):
+            score += 10000
+
+        elif (
+            target_wallet
+            and
+            source_wallet == target_wallet
+        ):
+            score += 6000
+
+        if (
+            target_name
+            and
+            name == target_name
+        ):
+            score += 2500
+
+        elif (
+            target_name
+            and
+            name
+            and
+            (
+                target_name in name
+                or
+                name in target_name
+            )
+        ):
+            score += 1200
+
+        if (
+            target_advisory
+            and
+            advisory == target_advisory
+        ):
+            score += 1800
+
+        if nhc_basin_matches(
+            attrs.get(
+                'basin'
+            ),
+            basin,
+        ):
+            score += 500
+
+        if score <= 0:
+            continue
+
+        ranked.append(
+            (
+                score,
+                nhc_feature_latest_time(
+                    group
+                ),
+                group_key,
+            )
+        )
+
+    if not ranked:
+        return []
+
+    ranked.sort(
+        reverse=True
+    )
+
+    selected = groups.get(
+        ranked[0][2],
+        [],
+    )
+
+    if target_advisory:
+        exact_advisory = [
+            feature
+            for feature in selected
+            if nhc_normalize_advisory_token(
+                (
+                    feature.get(
+                        'attributes'
+                    )
+                    or
+                    {}
+                ).get(
+                    'advisnum'
+                )
+            )
+            ==
+            target_advisory
+        ]
+
+        if exact_advisory:
+            selected = exact_advisory
+
+    return selected
+
+
+def nhc_arcgis_paths_mercator(
+    geometry: dict[str, Any],
+) -> list[
+    list[
+        tuple[
+            float,
+            float,
+        ]
+    ]
+]:
+    spatial_reference = (
+        geometry.get(
+            'spatialReference'
+        )
+        or
+        {}
+    )
+
+    wkid = int(
+        spatial_reference.get(
+            'latestWkid'
+        )
+        or
+        spatial_reference.get(
+            'wkid'
+        )
+        or
+        3857
+    )
+
+    out: list[
+        list[
+            tuple[
+                float,
+                float,
+            ]
+        ]
+    ] = []
+
+    for raw_path in (
+        geometry.get(
+            'paths'
+        )
+        or
+        []
+    ):
+        path: list[
+            tuple[
+                float,
+                float,
+            ]
+        ] = []
+
+        for coordinate in raw_path:
+            if (
+                not isinstance(
+                    coordinate,
+                    (list, tuple),
+                )
+                or
+                len(coordinate) < 2
+            ):
+                continue
+
+            x = float(
+                coordinate[0]
+            )
+            y = float(
+                coordinate[1]
+            )
+
+            if wkid in (
+                4326,
+                4269,
+            ):
+                path.append(
+                    lonlat_to_web_mercator(
+                        x,
+                        y,
+                    )
+                )
+            else:
+                path.append(
+                    (
+                        x,
+                        y,
+                    )
+                )
+
+        if len(path) >= 2:
+            out.append(
+                path
+            )
+
+    return out
+
+
+def nhc_draw_clean_cone(
+    image: Image.Image,
+    cone_features: list[dict[str, Any]],
+    bbox: tuple[float, float, float, float],
+) -> Image.Image:
+    out = image.copy().convert(
+        'RGBA'
+    )
+
+    draw = ImageDraw.Draw(
+        out,
+        'RGBA',
+    )
+
+    for feature in cone_features:
+        geometry = (
+            feature.get(
+                'geometry'
+            )
+            or
+            {}
+        )
+
+        for ring in arcgis_geometry_rings_mercator(
+            geometry,
+            default_wkid=3857,
+        ):
+            pixels = mercator_ring_to_pixels(
+                ring,
+                bbox,
+                out.width,
+                out.height,
+            )
+
+            if len(pixels) < 3:
+                continue
+
+            draw.polygon(
+                pixels,
+                fill=(
+                    224,
+                    229,
+                    234,
+                    165,
+                ),
+            )
+
+            closed = pixels + [
+                pixels[0]
+            ]
+
+            draw.line(
+                closed,
+                fill=(
+                    255,
+                    255,
+                    255,
+                    245,
+                ),
+                width=9,
+                joint='curve',
+            )
+
+            draw.line(
+                closed,
+                fill=(
+                    214,
+                    25,
+                    35,
+                    255,
+                ),
+                width=5,
+                joint='curve',
+            )
+
+    return out
+
+
+def nhc_draw_clean_track(
+    image: Image.Image,
+    track_features: list[dict[str, Any]],
+    bbox: tuple[float, float, float, float],
+) -> Image.Image:
+    out = image.copy().convert(
+        'RGBA'
+    )
+
+    draw = ImageDraw.Draw(
+        out,
+        'RGBA',
+    )
+
+    for feature in track_features:
+        geometry = (
+            feature.get(
+                'geometry'
+            )
+            or
+            {}
+        )
+
+        for path in nhc_arcgis_paths_mercator(
+            geometry
+        ):
+            pixels = mercator_ring_to_pixels(
+                path,
+                bbox,
+                out.width,
+                out.height,
+            )
+
+            if len(pixels) < 2:
+                continue
+
+            draw.line(
+                pixels,
+                fill=(
+                    255,
+                    255,
+                    255,
+                    245,
+                ),
+                width=9,
+                joint='curve',
+            )
+
+            draw.line(
+                pixels,
+                fill=(
+                    20,
+                    30,
+                    42,
+                    255,
+                ),
+                width=5,
+                joint='curve',
+            )
+
+    return out
+
+
+def nhc_draw_watch_warning_lines(
+    image: Image.Image,
+    warning_features: list[dict[str, Any]],
+    bbox: tuple[float, float, float, float],
+) -> Image.Image:
+    if not warning_features:
+        return image
+
+    out = image.copy().convert(
+        'RGBA'
+    )
+
+    draw = ImageDraw.Draw(
+        out,
+        'RGBA',
+    )
+
+    colors = {
+        'HWA': (255, 127, 127, 255),
+        'HWR': (255, 0, 0, 255),
+        'TWA': (245, 210, 0, 255),
+        'TWR': (0, 77, 168, 255),
+    }
+
+    for feature in warning_features:
+        attrs = (
+            feature.get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        color = colors.get(
+            squish(
+                str(
+                    attrs.get(
+                        'tcww'
+                    )
+                    or
+                    ''
+                )
+            ).upper(),
+            (180, 20, 40, 255),
+        )
+
+        for path in nhc_arcgis_paths_mercator(
+            feature.get(
+                'geometry'
+            )
+            or
+            {}
+        ):
+            pixels = mercator_ring_to_pixels(
+                path,
+                bbox,
+                out.width,
+                out.height,
+            )
+
+            if len(pixels) < 2:
+                continue
+
+            draw.line(
+                pixels,
+                fill=(255, 255, 255, 245),
+                width=10,
+                joint='curve',
+            )
+
+            draw.line(
+                pixels,
+                fill=color,
+                width=6,
+                joint='curve',
+            )
+
+    return out
+
+
+def nhc_forecast_tau(
+    feature: dict[str, Any],
+    fallback: int = 0,
+) -> int:
+    attrs = (
+        feature.get(
+            'attributes'
+        )
+        or
+        {}
+    )
+
+    for key in (
+        'tau',
+        'fcstprd',
+    ):
+        value = attrs.get(
+            key
+        )
+
+        if value in (
+            None,
+            '',
+        ):
+            continue
+
+        try:
+            return int(
+                round(
+                    float(
+                        value
+                    )
+                )
+            )
+        except Exception:
+            continue
+
+    return fallback
+
+
+def nhc_rects_intersect(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+    padding: int = 6,
+) -> bool:
+    return not (
+        left[2] + padding < right[0]
+        or
+        right[2] + padding < left[0]
+        or
+        left[3] + padding < right[1]
+        or
+        right[3] + padding < left[1]
+    )
+
+
+def nhc_draw_clean_forecast_labels(
     image: Image.Image,
     forecast_points: list[dict[str, Any]],
-    bbox: tuple[
-        float,
-        float,
-        float,
-        float,
-    ],
+    bbox: tuple[float, float, float, float],
     *,
     current_lon: Optional[float],
     current_lat: Optional[float],
@@ -14741,13 +15706,11 @@ def nhc_draw_named_wind_labels(
     )
 
     font = load_font(
-        19,
+        25,
         True,
     )
 
-    width, height = out.size
-
-    selected_points: list[
+    selected: list[
         tuple[
             int,
             dict[str, Any],
@@ -14757,63 +15720,31 @@ def nhc_draw_named_wind_labels(
     for index, feature in enumerate(
         forecast_points
     ):
-        attrs = (
-            feature.get(
-                'attributes'
-            )
-            or
-            {}
+        tau = nhc_forecast_tau(
+            feature,
+            index,
         )
 
-        try:
-            tau = int(
-                round(
-                    float(
-                        attrs.get(
-                            'tau'
-                        )
-                        if attrs.get(
-                            'tau'
-                        ) is not None
-                        else
-                        attrs.get(
-                            'fcstprd'
-                        )
-                        or
-                        0.0
-                    )
-                )
-            )
-        except Exception:
-            tau = index
-
-        if (
-            tau == 0
-            or
-            tau in {
-                24,
-                48,
-                72,
-                96,
-                120,
-            }
-        ):
-            selected_points.append(
+        if tau in {
+            0,
+            24,
+            48,
+            72,
+            96,
+            120,
+        }:
+            selected.append(
                 (
                     tau,
                     feature,
                 )
             )
 
-    if not selected_points:
-        return out
+    occupied: list[
+        tuple[int, int, int, int]
+    ] = []
 
-    for point_index, (
-        tau,
-        feature,
-    ) in enumerate(
-        selected_points
-    ):
+    for tau, feature in selected:
         attrs = (
             feature.get(
                 'attributes'
@@ -14837,35 +15768,27 @@ def nhc_draw_named_wind_labels(
             and
             current_lat is not None
         ):
-            point_x, point_y = (
-                lonlat_to_web_mercator(
-                    current_lon,
-                    current_lat,
-                )
+            point_x, point_y = lonlat_to_web_mercator(
+                current_lon,
+                current_lat,
             )
         else:
             try:
                 point_x = float(
-                    geometry[
-                        'x'
-                    ]
+                    geometry['x']
                 )
                 point_y = float(
-                    geometry[
-                        'y'
-                    ]
+                    geometry['y']
                 )
             except Exception:
                 continue
 
-        px, py = (
-            nhc_point_pixel_from_mercator(
-                point_x,
-                point_y,
-                bbox,
-                width,
-                height,
-            )
+        px, py = nhc_point_pixel_from_mercator(
+            point_x,
+            point_y,
+            bbox,
+            out.width,
+            out.height,
         )
 
         if (
@@ -14881,133 +15804,144 @@ def nhc_draw_named_wind_labels(
                 )
             )
 
+        radius = (
+            9
+            if tau == 0
+            else 7
+        )
+
+        draw.ellipse(
+            (
+                px - radius,
+                py - radius,
+                px + radius,
+                py + radius,
+            ),
+            fill=(
+                255,
+                255,
+                255,
+                255,
+            ),
+            outline=(
+                15,
+                20,
+                28,
+                255,
+            ),
+            width=4,
+        )
+
         if wind_mph is None:
             continue
 
         label = (
-            f'{wind_mph} mph'
+            f'NOW {wind_mph} mph'
+            if tau == 0
+            else
+            f'+{tau}h {wind_mph} mph'
         )
 
         text_box = draw.textbbox(
-            (
-                0,
-                0,
-            ),
+            (0, 0),
             label,
             font=font,
-            stroke_width=2,
         )
 
-        text_width = (
-            text_box[2]
-            -
-            text_box[0]
-        )
+        text_width = text_box[2] - text_box[0]
+        text_height = text_box[3] - text_box[1]
+        pad_x = 8
+        pad_y = 5
+        box_width = text_width + pad_x * 2
+        box_height = text_height + pad_y * 2
 
-        text_height = (
-            text_box[3]
-            -
-            text_box[1]
-        )
+        candidate_xy = [
+            (px + 14, py - box_height - 10),
+            (px + 14, py + 10),
+            (px - box_width - 14, py - box_height - 10),
+            (px - box_width - 14, py + 10),
+        ]
 
-        label_x = (
-            px
-            +
-            13
-        )
+        chosen: Optional[
+            tuple[int, int, int, int]
+        ] = None
 
-        if (
-            label_x
-            +
-            text_width
-            >
-            width
-            -
-            8
-        ):
-            label_x = (
-                px
-                -
-                text_width
-                -
-                13
+        for left, top in candidate_xy:
+            left = int(
+                max(
+                    7,
+                    min(
+                        out.width - box_width - 7,
+                        left,
+                    ),
+                )
+            )
+            top = int(
+                max(
+                    7,
+                    min(
+                        out.height - box_height - 7,
+                        top,
+                    ),
+                )
             )
 
-        label_y = (
-            py
-            -
-            text_height
-            -
-            10
-            if point_index % 2 == 0
-            else
-            py
-            +
-            10
+            rect = (
+                left,
+                top,
+                left + box_width,
+                top + box_height,
+            )
+
+            if not any(
+                nhc_rects_intersect(
+                    rect,
+                    other,
+                )
+                for other in occupied
+            ):
+                chosen = rect
+                break
+
+        if chosen is None:
+            continue
+
+        occupied.append(
+            chosen
         )
 
-        label_y = min(
-            max(
-                8,
-                label_y,
+        draw.rounded_rectangle(
+            chosen,
+            radius=7,
+            fill=(
+                255,
+                255,
+                255,
+                225,
             ),
-            height
-            -
-            text_height
-            -
-            8,
+            outline=(
+                30,
+                38,
+                48,
+                205,
+            ),
+            width=2,
         )
 
         draw.text(
             (
-                label_x,
-                label_y,
+                chosen[0] + pad_x,
+                chosen[1] + pad_y,
             ),
             label,
             font=font,
             fill=(
-                0,
-                0,
-                0,
+                10,
+                15,
+                22,
                 255,
-            ),
-            stroke_width=3,
-            stroke_fill=(
-                255,
-                255,
-                255,
-                248,
             ),
         )
-
-        if (
-            tau == 0
-            and
-            current_lon is not None
-            and
-            current_lat is not None
-        ):
-            draw.ellipse(
-                (
-                    px - 6,
-                    py - 6,
-                    px + 6,
-                    py + 6,
-                ),
-                fill=(
-                    0,
-                    0,
-                    0,
-                    255,
-                ),
-                outline=(
-                    255,
-                    255,
-                    255,
-                    255,
-                ),
-                width=2,
-            )
 
     return out
 
@@ -15017,16 +15951,14 @@ def build_mapbox_nhc_storm_map(
     kind: str,
     basin: str,
 ) -> str:
-    _storm_type, parsed_storm_name = (
-        nhc_storm_identity(
-            item
-        )
+    _storm_type, parsed_storm_name = nhc_storm_identity(
+        item
     )
 
     if not parsed_storm_name:
         return ''
 
-    forecast_points, gis_storm_name, _gis_source = (
+    forecast_points, gis_storm_name, gis_source = (
         nhc_select_forecast_group(
             item,
             basin,
@@ -15044,20 +15976,6 @@ def build_mapbox_nhc_storm_map(
         {}
     )
 
-    where_value = (
-        gis_storm_name
-        or
-        parsed_storm_name
-    )
-
-    where_parts = [
-        'stormname = '
-        +
-        sql_quote(
-            where_value
-        )
-    ]
-
     advisory_number = squish(
         str(
             first_attrs.get(
@@ -15068,100 +15986,43 @@ def build_mapbox_nhc_storm_map(
         )
     )
 
-    if advisory_number:
-        where_parts.append(
-            'advisnum = '
-            +
-            sql_quote(
-                advisory_number
-            )
-        )
-
-    layer_where = (
-        ' AND '.join(
-            where_parts
-        )
+    storm_name = (
+        gis_storm_name
+        or
+        parsed_storm_name
     )
 
-    cone_features = arcgis_query_features(
-        NHC_TROPICAL_MAPSERVER,
+    # Match every forecast layer primarily by idp_source/wallet.  This avoids
+    # the brittle old behavior where stormname/advisnum formatting differences
+    # could leave points on the map but silently drop the actual cone.
+    cone_features = nhc_select_related_forecast_layer(
         NHC_FORECAST_CONE_LAYER,
-        where=layer_where,
-        out_fields='*',
-        return_geometry=True,
-        out_sr=3857,
+        gis_source=gis_source,
+        storm_name=storm_name,
+        basin=basin,
+        advisory_number=advisory_number,
     )
 
     if not cone_features:
-        cone_features = arcgis_query_features(
-            NHC_TROPICAL_MAPSERVER,
-            NHC_FORECAST_CONE_LAYER,
-            where=(
-                'stormname = '
-                +
-                sql_quote(
-                    where_value
-                )
-            ),
-            out_fields='*',
-            return_geometry=True,
-            out_sr=3857,
-        )
+        # A named-cyclone map without an uncertainty cone is not considered a
+        # successful map.  Defer until the official cone layer catches up.
+        return ''
 
-        if cone_features:
-            latest_advisory = squish(
-                str(
-                    (
-                        cone_features[-1].get(
-                            'attributes'
-                        )
-                        or
-                        {}
-                    ).get(
-                        'advisnum'
-                    )
-                    or
-                    ''
-                )
-            )
+    track_features = nhc_select_related_forecast_layer(
+        NHC_FORECAST_TRACK_LAYER,
+        gis_source=gis_source,
+        storm_name=storm_name,
+        basin=basin,
+        advisory_number=advisory_number,
+    )
 
-            if latest_advisory:
-                layer_where = (
-                    'stormname = '
-                    +
-                    sql_quote(
-                        where_value
-                    )
-                    +
-                    ' AND advisnum = '
-                    +
-                    sql_quote(
-                        latest_advisory
-                    )
-                )
-
-                cone_features = [
-                    feature
-                    for feature
-                    in cone_features
-                    if squish(
-                        str(
-                            (
-                                feature.get(
-                                    'attributes'
-                                )
-                                or
-                                {}
-                            ).get(
-                                'advisnum'
-                            )
-                            or
-                            ''
-                        )
-                    )
-                    ==
-                    latest_advisory
-                ]
+    warning_features = nhc_select_related_forecast_layer(
+        NHC_WATCH_WARNING_LAYER,
+        gis_source=gis_source,
+        storm_name=storm_name,
+        basin=basin,
+        advisory_number=advisory_number,
+    )
 
     map_points: list[
         tuple[
@@ -15170,40 +16031,24 @@ def build_mapbox_nhc_storm_map(
         ]
     ] = []
 
-    for feature in forecast_points:
-        geometry = (
-            feature.get(
-                'geometry'
+    for collection in (
+        cone_features,
+        track_features,
+        forecast_points,
+    ):
+        for feature in collection:
+            map_points.extend(
+                nhc_arcgis_geometry_points(
+                    feature.get(
+                        'geometry'
+                    )
+                    or
+                    {}
+                )
             )
-            or
-            {}
-        )
 
-        map_points.extend(
-            nhc_arcgis_geometry_points(
-                geometry
-            )
-        )
-
-    for feature in cone_features:
-        geometry = (
-            feature.get(
-                'geometry'
-            )
-            or
-            {}
-        )
-
-        map_points.extend(
-            nhc_arcgis_geometry_points(
-                geometry
-            )
-        )
-
-    current_lon, current_lat = (
-        nhc_lonlat_from_text(
-            item.multiline_text
-        )
+    current_lon, current_lat = nhc_lonlat_from_text(
+        item.multiline_text
     )
 
     if (
@@ -15228,9 +16073,9 @@ def build_mapbox_nhc_storm_map(
         map_points,
         width,
         height,
-        padding_factor=1.35,
-        min_width_m=1500000.0,
-        min_height_m=900000.0,
+        padding_factor=1.18,
+        min_width_m=1250000.0,
+        min_height_m=760000.0,
     )
 
     base = fetch_mapbox_light_base(
@@ -15243,43 +16088,39 @@ def build_mapbox_nhc_storm_map(
         base
     )
 
-    overlay = nhc_export_summary_overlay(
+    base = nhc_draw_clean_cone(
+        base,
+        cone_features,
         bbox,
-        width,
-        height,
-        (
-            NHC_FORECAST_TRACK_LAYER,
-            NHC_FORECAST_CONE_LAYER,
-            NHC_WATCH_WARNING_LAYER,
-            NHC_FORECAST_POINTS_LAYER,
-        ),
-        layer_where=
-            layer_where,
     )
 
-    base.alpha_composite(
-        overlay
+    base = nhc_draw_clean_track(
+        base,
+        track_features,
+        bbox,
     )
 
-    base = nhc_draw_named_wind_labels(
+    base = nhc_draw_watch_warning_lines(
+        base,
+        warning_features,
+        bbox,
+    )
+
+    base = nhc_draw_clean_forecast_labels(
         base,
         forecast_points,
         bbox,
-        current_lon=
-            current_lon,
-        current_lat=
-            current_lat,
-        current_wind_mph=
-            nhc_wind_mph(
-                item.multiline_text
-            ),
+        current_lon=current_lon,
+        current_lat=current_lat,
+        current_wind_mph=nhc_wind_mph(
+            item.multiline_text
+        ),
     )
 
     return save_map_image(
         base,
-        prefix='nhc_storm_',
+        prefix='nhc_storm_clean_',
     )
-
 
 def nhc_page_image(
     page_url: str,
@@ -15962,15 +16803,21 @@ def nhc_product_logical_key(
     )
 
     advisory = ''
-    match = re.search(
-        r'(?i)ADVISORY\s+NUMBER\s+([0-9]+[A-Z]?)',
-        raw,
-    )
 
-    if match:
-        advisory = match.group(
-            1
-        ).upper()
+    for pattern in (
+        r'(?i)ADVISORY\s+NUMBER\s+([0-9]+[A-Z]?)',
+        r'(?i)FORECAST/?ADVISORY\s+NUMBER\s+([0-9]+[A-Z]?)',
+    ):
+        match = re.search(
+            pattern,
+            raw,
+        )
+
+        if match:
+            advisory = nhc_normalize_advisory_token(
+                match.group(1)
+            )
+            break
 
     wmo_stamp = ''
     match = re.search(
@@ -15979,42 +16826,84 @@ def nhc_product_logical_key(
     )
 
     if match:
-        wmo_stamp = match.group(
-            1
-        )
+        wmo_stamp = match.group(1)
 
-    published = (
+    storm_token = nhc_normalized_storm_token(
+        storm
+    )
+
+    season = (
         item.published.strftime(
-            '%Y%m%d%H%M'
+            '%Y'
         )
         if item.published
-        else
-        ''
-    )
-
-    time_token = (
-        wmo_stamp
-        or
-        published
-    )
-
-    identity = '|'.join(
-        (
-            'nhc',
-            basin,
-            kind,
-            nhc_normalized_storm_token(
-                storm
-            ),
-            advisory,
-            time_token,
+        else str(
+            utcnow().year
         )
     )
+
+    if kind == 'tcu':
+        # A Tropical Cyclone Update is a genuinely new between-advisory event.
+        # Keep it separate, but still collapse duplicate copies of that update
+        # from basin and wallet feeds by its official WMO issuance minute.
+        published = (
+            item.published.strftime(
+                '%Y%m%d%H%M'
+            )
+            if item.published
+            else ''
+        )
+
+        identity = '|'.join(
+            (
+                'nhc_update',
+                season,
+                basin,
+                storm_token,
+                wmo_stamp
+                or
+                published,
+            )
+        )
+
+    elif advisory:
+        # The public advisory, forecast advisory and discussion are different
+        # documents for one NHC advisory cycle.  They must result in ONE social
+        # post, not three-to-five near-simultaneous posts.
+        identity = '|'.join(
+            (
+                'nhc_advisory',
+                season,
+                basin,
+                storm_token,
+                advisory,
+            )
+        )
+
+    else:
+        published = (
+            item.published.strftime(
+                '%Y%m%d%H%M'
+            )
+            if item.published
+            else ''
+        )
+
+        identity = '|'.join(
+            (
+                'nhc_product',
+                season,
+                basin,
+                storm_token,
+                wmo_stamp
+                or
+                published,
+            )
+        )
 
     return sha256_text(
         identity
     )
-
 
 def nhc_collect_basin_items(
     db: StateDB,
@@ -16188,12 +17077,39 @@ def poll_nhc_basin_feed(
             key
         )
 
+        kind_priority = {
+            'tcm': 4,
+            'tcp': 3,
+            'tcu': 2,
+            'tcd': 1,
+        }
+
+        existing_priority = (
+            kind_priority.get(
+                existing[1],
+                0,
+            )
+            if existing is not None
+            else -1
+        )
+
+        candidate_priority = kind_priority.get(
+            kind,
+            0,
+        )
+
         if (
             existing is None
             or
-            len(hydrated.multiline_text)
-            >
-            len(existing[0].multiline_text)
+            candidate_priority > existing_priority
+            or
+            (
+                candidate_priority == existing_priority
+                and
+                len(hydrated.multiline_text)
+                >
+                len(existing[0].multiline_text)
+            )
         ):
             prepared_by_key[
                 key
@@ -16213,7 +17129,7 @@ def poll_nhc_basin_feed(
     ]
 
     state_source = (
-        f'nhc_basin_products_v810:{basin}'
+        f'nhc_basin_products_v812:{basin}'
     )
 
     if not db.source_primed(
@@ -16439,24 +17355,8 @@ def render_nhc_storm(
         )
 
     if not image_path:
-        try:
-            image_path = (
-                nhc_page_image(
-                    item.link
-                )
-            )
-
-        except Exception:
-            log.exception(
-                'Could not obtain '
-                'official NHC storm image '
-                'for %s',
-                storm_label,
-            )
-
-    if not image_path:
         raise RetryableSourceDataError(
-            f'NHC {storm_label} {product} has no complete official map yet'
+            f'NHC {storm_label} {product} has no complete matched cone map yet'
         )
 
     return RenderedPost(

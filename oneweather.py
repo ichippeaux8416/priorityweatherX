@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-27-mapbox-outlook-text-v8.3'
+BUILD_ID = '2026-08-27-nhc-mapbox-v8.4'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -2334,6 +2334,166 @@ def download_image_to_temp(
     return image_bytes_to_temp(
         response.content,
         prefix=prefix,
+    )
+
+
+def nhc_browser_headers(
+    *,
+    referer: str = 'https://www.nhc.noaa.gov/',
+    image: bool = False,
+) -> dict[str, str]:
+    return {
+        'User-Agent': (
+            'Mozilla/5.0 '
+            '(X11; Linux x86_64) '
+            'AppleWebKit/537.36 '
+            '(KHTML, like Gecko) '
+            'Chrome/127.0.0.0 '
+            'Safari/537.36'
+        ),
+        'Accept': (
+            'image/avif,'
+            'image/webp,'
+            'image/apng,'
+            'image/svg+xml,'
+            'image/*,*/*;q=0.8'
+            if image
+            else
+            'text/html,'
+            'application/xhtml+xml,'
+            'application/xml;q=0.9,'
+            '*/*;q=0.8'
+        ),
+        'Referer': referer,
+        'Accept-Language':
+            'en-US,en;q=0.9',
+        'Cache-Control':
+            'no-cache',
+        'Pragma':
+            'no-cache',
+        'Sec-Fetch-Dest':
+            'image'
+            if image
+            else
+            'document',
+        'Sec-Fetch-Mode':
+            'no-cors'
+            if image
+            else
+            'navigate',
+        'Sec-Fetch-Site':
+            'same-origin',
+    }
+
+
+def download_nhc_image_to_temp(
+    url: str,
+    prefix: str = 'nhc_',
+    *,
+    referer: str = 'https://www.nhc.noaa.gov/',
+) -> str:
+    if not url:
+        return ''
+
+    headers = nhc_browser_headers(
+        referer=referer,
+        image=True,
+    )
+
+    try:
+        HTTP.get(
+            'https://www.nhc.noaa.gov/',
+            headers=nhc_browser_headers(),
+            timeout=(
+                8,
+                20,
+            ),
+        )
+
+    except Exception:
+        pass
+
+    attempts = [
+        url,
+    ]
+
+    if '?' not in url:
+        attempts.append(
+            url
+            +
+            f'?v={int(time.time())}'
+        )
+
+    last_error: Optional[Exception] = None
+
+    for candidate in attempts:
+        try:
+            response = http_get(
+                candidate,
+                headers=headers,
+                timeout=(
+                    8,
+                    45,
+                ),
+            )
+
+            return image_bytes_to_temp(
+                response.content,
+                prefix=prefix,
+            )
+
+        except Exception as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
+
+    return ''
+
+
+def fetch_nhc_product_page(
+    url: str,
+) -> tuple[
+    str,
+    BeautifulSoup,
+]:
+    response = http_get(
+        url,
+        headers=nhc_browser_headers(
+            referer='https://www.nhc.noaa.gov/',
+            image=False,
+        ),
+        timeout=(
+            8,
+            35,
+        ),
+    )
+
+    soup = BeautifulSoup(
+        response.text,
+        'html.parser',
+    )
+
+    pre = soup.find(
+        'pre'
+    )
+
+    page_text = (
+        pre.get_text(
+            '\n',
+            strip=True,
+        )
+        if pre
+        else
+        soup.get_text(
+            '\n',
+            strip=True,
+        )
+    )
+
+    return (
+        page_text,
+        soup,
     )
 
 
@@ -8223,6 +8383,1409 @@ def nhc_center_location(
     )
 
 
+def nhc_coordinate_value(
+    token: str,
+) -> Optional[float]:
+    match = re.fullmatch(
+        r'\s*'
+        r'([0-9]+(?:\.[0-9]+)?)'
+        r'\s*'
+        r'([NSEW])'
+        r'\s*',
+        token,
+        re.I,
+    )
+
+    if not match:
+        return None
+
+    value = float(
+        match.group(
+            1
+        )
+    )
+
+    hemisphere = (
+        match.group(
+            2
+        )
+        .upper()
+    )
+
+    if hemisphere in {
+        'S',
+        'W',
+    }:
+        value *= -1.0
+
+    return value
+
+
+def nhc_lonlat_from_text(
+    text: str,
+) -> tuple[
+    Optional[float],
+    Optional[float],
+]:
+    candidates = [
+        nhc_center_location(
+            text
+        ),
+        text,
+    ]
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+
+        match = re.search(
+            r'('
+            r'[0-9]+(?:\.[0-9]+)?'
+            r'\s*[NS]'
+            r')'
+            r'[^0-9A-Z]+'
+            r'('
+            r'[0-9]+(?:\.[0-9]+)?'
+            r'\s*[EW]'
+            r')',
+            candidate,
+            re.I,
+        )
+
+        if not match:
+            continue
+
+        lat = nhc_coordinate_value(
+            match.group(
+                1
+            )
+        )
+
+        lon = nhc_coordinate_value(
+            match.group(
+                2
+            )
+        )
+
+        if (
+            lat is not None
+            and
+            lon is not None
+        ):
+            return (
+                lon,
+                lat,
+            )
+
+    return (
+        None,
+        None,
+    )
+
+
+def nhc_forecast_points(
+    text: str,
+) -> list[
+    tuple[
+        str,
+        float,
+        float,
+        Optional[int],
+    ]
+]:
+    points: list[
+        tuple[
+            str,
+            float,
+            float,
+            Optional[int],
+        ]
+    ] = []
+
+    pattern = re.compile(
+        r'(?im)^'
+        r'\s*'
+        r'(INIT|\d{1,3}H)'
+        r'\s+'
+        r'\d{1,2}/\d{4}Z'
+        r'\s+'
+        r'([0-9]+(?:\.[0-9]+)?[NS])'
+        r'\s+'
+        r'([0-9]+(?:\.[0-9]+)?[EW])'
+        r'\s+'
+        r'(\d+)'
+        r'\s+KT'
+        r'(?:'
+        r'\s+'
+        r'(\d+)'
+        r'\s+MPH'
+        r')?'
+    )
+
+    for match in pattern.finditer(
+        text
+    ):
+        lat = nhc_coordinate_value(
+            match.group(
+                2
+            )
+        )
+
+        lon = nhc_coordinate_value(
+            match.group(
+                3
+            )
+        )
+
+        if (
+            lat is None
+            or
+            lon is None
+        ):
+            continue
+
+        mph = (
+            int(
+                match.group(
+                    5
+                )
+            )
+            if
+            match.group(
+                5
+            )
+            else
+            int(
+                round(
+                    int(
+                        match.group(
+                            4
+                        )
+                    )
+                    *
+                    1.15078
+                )
+            )
+        )
+
+        points.append(
+            (
+                match.group(
+                    1
+                ).upper(),
+                lon,
+                lat,
+                mph,
+            )
+        )
+
+    return points
+
+
+def nhc_unwrap_track_longitudes(
+    points: list[
+        tuple[
+            str,
+            float,
+            float,
+            Optional[int],
+        ]
+    ],
+) -> list[
+    tuple[
+        str,
+        float,
+        float,
+        Optional[int],
+    ]
+]:
+    if not points:
+        return []
+
+    reference = points[0][1]
+    out: list[
+        tuple[
+            str,
+            float,
+            float,
+            Optional[int],
+        ]
+    ] = []
+
+    for (
+        label,
+        lon,
+        lat,
+        mph,
+    ) in points:
+        adjusted = lon
+
+        while (
+            adjusted
+            -
+            reference
+            >
+            180.0
+        ):
+            adjusted -= 360.0
+
+        while (
+            adjusted
+            -
+            reference
+            <
+            -180.0
+        ):
+            adjusted += 360.0
+
+        out.append(
+            (
+                label,
+                adjusted,
+                lat,
+                mph,
+            )
+        )
+
+    average_lon = (
+        sum(
+            point[1]
+            for point
+            in out
+        )
+        /
+        len(
+            out
+        )
+    )
+
+    shift = 0.0
+
+    while average_lon + shift > 180.0:
+        shift -= 360.0
+
+    while average_lon + shift < -180.0:
+        shift += 360.0
+
+    if shift:
+        out = [
+            (
+                label,
+                lon + shift,
+                lat,
+                mph,
+            )
+            for (
+                label,
+                lon,
+                lat,
+                mph,
+            )
+            in out
+        ]
+
+    return out
+
+
+def nhc_storm_name(
+    item: RSSItem,
+) -> str:
+    combined = (
+        f'{item.title} '
+        +
+        item.multiline_text[:1200]
+    )
+
+    match = re.search(
+        r'(?i)\b'
+        r'('
+        r'(?:Major\s+)?Hurricane'
+        r'|'
+        r'Tropical Storm'
+        r'|'
+        r'Tropical Depression'
+        r'|'
+        r'Subtropical Storm'
+        r'|'
+        r'Subtropical Depression'
+        r'|'
+        r'Potential Tropical Cyclone'
+        r')'
+        r'\s+'
+        r'([A-Z][A-Z0-9-]{1,20})'
+        r'\b',
+        combined,
+        re.I,
+    )
+
+    if not match:
+        return ''
+
+    storm_type = (
+        match.group(
+            1
+        )
+        .title()
+    )
+
+    name = (
+        match.group(
+            2
+        )
+        .title()
+    )
+
+    return f'{storm_type} {name}'
+
+
+def nhc_wind_mph(
+    text: str,
+) -> Optional[int]:
+    winds = find_nhc_field(
+        text,
+        'MAXIMUM SUSTAINED WINDS',
+    )
+
+    match = re.search(
+        r'\b(\d+)\s*MPH\b',
+        winds,
+        re.I,
+    )
+
+    if not match:
+        return None
+
+    return int(
+        match.group(
+            1
+        )
+    )
+
+
+def nhc_movement_bearing(
+    text: str,
+) -> Optional[float]:
+    movement = (
+        find_nhc_field(
+            text,
+            'PRESENT MOVEMENT',
+        )
+        or
+        find_nhc_field(
+            text,
+            'MOVEMENT',
+        )
+    )
+
+    if not movement:
+        return None
+
+    degree_match = re.search(
+        r'\b(\d{1,3})\s+DEGREES\b',
+        movement,
+        re.I,
+    )
+
+    if degree_match:
+        return (
+            float(
+                degree_match.group(
+                    1
+                )
+            )
+            %
+            360.0
+        )
+
+    direction_match = re.search(
+        r'\b'
+        r'(NNE|ENE|ESE|SSE|'
+        r'SSW|WSW|WNW|NNW|'
+        r'NE|SE|SW|NW|'
+        r'N|E|S|W)'
+        r'\b',
+        movement.upper(),
+    )
+
+    if not direction_match:
+        return None
+
+    bearings = {
+        'N': 0.0,
+        'NNE': 22.5,
+        'NE': 45.0,
+        'ENE': 67.5,
+        'E': 90.0,
+        'ESE': 112.5,
+        'SE': 135.0,
+        'SSE': 157.5,
+        'S': 180.0,
+        'SSW': 202.5,
+        'SW': 225.0,
+        'WSW': 247.5,
+        'W': 270.0,
+        'WNW': 292.5,
+        'NW': 315.0,
+        'NNW': 337.5,
+    }
+
+    return bearings.get(
+        direction_match.group(
+            1
+        )
+    )
+
+
+def nhc_map_marker_color(
+    wind_mph: Optional[int],
+) -> tuple[
+    int,
+    int,
+    int,
+    int,
+]:
+    if wind_mph is None:
+        return (
+            201,
+            42,
+            42,
+            255,
+        )
+
+    if wind_mph >= 111:
+        return (
+            143,
+            32,
+            32,
+            255,
+        )
+
+    if wind_mph >= 74:
+        return (
+            191,
+            47,
+            47,
+            255,
+        )
+
+    if wind_mph >= 39:
+        return (
+            222,
+            93,
+            38,
+            255,
+        )
+
+    return (
+        235,
+        159,
+        52,
+        255,
+    )
+
+
+def nhc_lonlat_pixel(
+    lon: float,
+    lat: float,
+    bbox: tuple[
+        float,
+        float,
+        float,
+        float,
+    ],
+    width: int,
+    height: int,
+) -> tuple[
+    int,
+    int,
+]:
+    x, y = lonlat_to_web_mercator(
+        lon,
+        lat,
+    )
+
+    minx, miny, maxx, maxy = bbox
+
+    px = int(
+        round(
+            (
+                x
+                -
+                minx
+            )
+            /
+            max(
+                maxx
+                -
+                minx,
+                1.0,
+            )
+            *
+            (
+                width
+                -
+                1
+            )
+        )
+    )
+
+    py = int(
+        round(
+            (
+                maxy
+                -
+                y
+            )
+            /
+            max(
+                maxy
+                -
+                miny,
+                1.0,
+            )
+            *
+            (
+                height
+                -
+                1
+            )
+        )
+    )
+
+    return (
+        px,
+        py,
+    )
+
+
+def nhc_draw_movement_arrow(
+    draw: ImageDraw.ImageDraw,
+    start: tuple[
+        int,
+        int,
+    ],
+    bearing: float,
+) -> None:
+    length = 105
+    radians = math.radians(
+        bearing
+    )
+
+    x0, y0 = start
+
+    x1 = (
+        x0
+        +
+        int(
+            round(
+                math.sin(
+                    radians
+                )
+                *
+                length
+            )
+        )
+    )
+
+    y1 = (
+        y0
+        -
+        int(
+            round(
+                math.cos(
+                    radians
+                )
+                *
+                length
+            )
+        )
+    )
+
+    draw.line(
+        (
+            x0,
+            y0,
+            x1,
+            y1,
+        ),
+        fill=(
+            255,
+            255,
+            255,
+            245,
+        ),
+        width=11,
+    )
+
+    draw.line(
+        (
+            x0,
+            y0,
+            x1,
+            y1,
+        ),
+        fill=(
+            36,
+            57,
+            82,
+            255,
+        ),
+        width=6,
+    )
+
+    head = 20
+
+    left_angle = (
+        radians
+        +
+        math.radians(
+            155
+        )
+    )
+
+    right_angle = (
+        radians
+        -
+        math.radians(
+            155
+        )
+    )
+
+    left = (
+        x1
+        +
+        int(
+            round(
+                math.sin(
+                    left_angle
+                )
+                *
+                head
+            )
+        ),
+        y1
+        -
+        int(
+            round(
+                math.cos(
+                    left_angle
+                )
+                *
+                head
+            )
+        ),
+    )
+
+    right = (
+        x1
+        +
+        int(
+            round(
+                math.sin(
+                    right_angle
+                )
+                *
+                head
+            )
+        ),
+        y1
+        -
+        int(
+            round(
+                math.cos(
+                    right_angle
+                )
+                *
+                head
+            )
+        ),
+    )
+
+    draw.polygon(
+        [
+            (
+                x1,
+                y1,
+            ),
+            left,
+            right,
+        ],
+        fill=(
+            36,
+            57,
+            82,
+            255,
+        ),
+    )
+
+
+def build_mapbox_nhc_storm_map(
+    item: RSSItem,
+    kind: str,
+    basin: str,
+) -> str:
+    width = 1200
+    height = 760
+
+    raw = item.multiline_text
+
+    track = nhc_unwrap_track_longitudes(
+        nhc_forecast_points(
+            raw
+        )[:7]
+    )
+
+    current_lon, current_lat = (
+        nhc_lonlat_from_text(
+            raw
+        )
+    )
+
+    if track:
+        if (
+            current_lon is None
+            or
+            current_lat is None
+        ):
+            current_lon = track[0][1]
+            current_lat = track[0][2]
+
+        elif (
+            abs(
+                current_lon
+                -
+                track[0][1]
+            )
+            >
+            180.0
+        ):
+            while (
+                current_lon
+                -
+                track[0][1]
+                >
+                180.0
+            ):
+                current_lon -= 360.0
+
+            while (
+                current_lon
+                -
+                track[0][1]
+                <
+                -180.0
+            ):
+                current_lon += 360.0
+
+    if (
+        current_lon is None
+        or
+        current_lat is None
+    ):
+        return ''
+
+    map_points: list[
+        tuple[
+            float,
+            float,
+        ]
+    ] = []
+
+    if track:
+        map_points.extend(
+            lonlat_to_web_mercator(
+                lon,
+                lat,
+            )
+            for (
+                _label,
+                lon,
+                lat,
+                _mph,
+            )
+            in track
+        )
+
+    map_points.append(
+        lonlat_to_web_mercator(
+            current_lon,
+            current_lat,
+        )
+    )
+
+    bbox = mercator_bbox_from_points(
+        map_points,
+        width,
+        height,
+        padding_factor=1.65,
+        min_width_m=2400000.0,
+        min_height_m=1450000.0,
+    )
+
+    base = fetch_mapbox_light_base(
+        bbox,
+        width,
+        height,
+    )
+
+    base = add_reference_boundaries(
+        base,
+        bbox,
+        counties=False,
+        states=True,
+    )
+
+    draw = ImageDraw.Draw(
+        base,
+        'RGBA',
+    )
+
+    title_font = load_font(
+        40,
+        True,
+    )
+
+    subtitle_font = load_font(
+        23,
+        False,
+    )
+
+    info_font = load_font(
+        24,
+        False,
+    )
+
+    point_font = load_font(
+        19,
+        True,
+    )
+
+    small_font = load_font(
+        17,
+        False,
+    )
+
+    product_labels = {
+        'tcp':
+            'Public Advisory',
+        'tcu':
+            'Tropical Cyclone Update',
+        'tcd':
+            'Forecast Discussion',
+        'tcm':
+            'Forecast Advisory',
+    }
+
+    storm_name = (
+        nhc_storm_name(
+            item
+        )
+        or
+        'Tropical Cyclone'
+    )
+
+    issued = (
+        find_local_issue_clock(
+            raw
+        )
+        or
+        (
+            item.published.strftime(
+                '%-I:%M %p UTC'
+            )
+            if item.published
+            else
+            ''
+        )
+    )
+
+    header_right = 720
+
+    draw.rounded_rectangle(
+        (
+            26,
+            24,
+            header_right,
+            132,
+        ),
+        radius=22,
+        fill=(
+            255,
+            255,
+            255,
+            226,
+        ),
+        outline=(
+            0,
+            0,
+            0,
+            35,
+        ),
+        width=2,
+    )
+
+    draw.text(
+        (
+            50,
+            39,
+        ),
+        truncate(
+            storm_name,
+            38,
+        ),
+        font=title_font,
+        fill=(
+            20,
+            29,
+            42,
+            255,
+        ),
+    )
+
+    subtitle = product_labels.get(
+        kind,
+        'Tropical Cyclone Update',
+    )
+
+    if issued:
+        subtitle += (
+            ' | Issued '
+            +
+            issued
+        )
+
+    draw.text(
+        (
+            52,
+            91,
+        ),
+        truncate(
+            subtitle,
+            74,
+        ),
+        font=subtitle_font,
+        fill=(
+            57,
+            74,
+            96,
+            255,
+        ),
+    )
+
+    winds = find_nhc_field(
+        raw,
+        'MAXIMUM SUSTAINED WINDS',
+    )
+
+    movement = find_nhc_field(
+        raw,
+        'PRESENT MOVEMENT',
+    )
+
+    pressure = find_nhc_field(
+        raw,
+        'MINIMUM CENTRAL PRESSURE',
+    )
+
+    info_lines: list[str] = []
+
+    location = nhc_center_location(
+        raw
+    )
+
+    if location:
+        info_lines.append(
+            'Center: '
+            +
+            truncate(
+                location,
+                34,
+            )
+        )
+
+    if winds:
+        info_lines.append(
+            'Winds: '
+            +
+            truncate(
+                winds,
+                34,
+            )
+        )
+
+    if movement:
+        info_lines.append(
+            'Movement: '
+            +
+            truncate(
+                movement,
+                34,
+            )
+        )
+
+    if pressure:
+        info_lines.append(
+            'Pressure: '
+            +
+            truncate(
+                pressure,
+                34,
+            )
+        )
+
+    if info_lines:
+        card_left = 760
+        card_top = 24
+        card_bottom = (
+            card_top
+            +
+            30
+            +
+            len(
+                info_lines
+            )
+            *
+            34
+            +
+            24
+        )
+
+        draw.rounded_rectangle(
+            (
+                card_left,
+                card_top,
+                width - 26,
+                card_bottom,
+            ),
+            radius=22,
+            fill=(
+                255,
+                255,
+                255,
+                226,
+            ),
+            outline=(
+                0,
+                0,
+                0,
+                35,
+            ),
+            width=2,
+        )
+
+        y = card_top + 22
+
+        for line in info_lines:
+            draw.text(
+                (
+                    card_left + 22,
+                    y,
+                ),
+                line,
+                font=info_font,
+                fill=(
+                    38,
+                    50,
+                    69,
+                    255,
+                ),
+            )
+
+            y += 34
+
+    if len(
+        track
+    ) >= 2:
+        track_pixels = [
+            nhc_lonlat_pixel(
+                lon,
+                lat,
+                bbox,
+                width,
+                height,
+            )
+            for (
+                _label,
+                lon,
+                lat,
+                _mph,
+            )
+            in track
+        ]
+
+        draw.line(
+            track_pixels,
+            fill=(
+                255,
+                255,
+                255,
+                245,
+            ),
+            width=12,
+            joint='curve',
+        )
+
+        draw.line(
+            track_pixels,
+            fill=(
+                37,
+                69,
+                106,
+                255,
+            ),
+            width=7,
+            joint='curve',
+        )
+
+        for (
+            index,
+            (
+                label,
+                lon,
+                lat,
+                mph,
+            ),
+        ) in enumerate(
+            track
+        ):
+            px, py = nhc_lonlat_pixel(
+                lon,
+                lat,
+                bbox,
+                width,
+                height,
+            )
+
+            radius = (
+                15
+                if index == 0
+                else
+                10
+            )
+
+            color = nhc_map_marker_color(
+                mph
+            )
+
+            draw.ellipse(
+                (
+                    px - radius - 4,
+                    py - radius - 4,
+                    px + radius + 4,
+                    py + radius + 4,
+                ),
+                fill=(
+                    255,
+                    255,
+                    255,
+                    245,
+                ),
+            )
+
+            draw.ellipse(
+                (
+                    px - radius,
+                    py - radius,
+                    px + radius,
+                    py + radius,
+                ),
+                fill=color,
+                outline=(
+                    27,
+                    37,
+                    50,
+                    255,
+                ),
+                width=2,
+            )
+
+            if index > 0:
+                label_text = label
+
+                if mph:
+                    label_text += (
+                        f' {mph} mph'
+                    )
+
+                text_box = draw.textbbox(
+                    (
+                        0,
+                        0,
+                    ),
+                    label_text,
+                    font=point_font,
+                )
+
+                text_width = (
+                    text_box[2]
+                    -
+                    text_box[0]
+                )
+
+                label_x = min(
+                    max(
+                        12,
+                        px + 14,
+                    ),
+                    width
+                    -
+                    text_width
+                    -
+                    24,
+                )
+
+                label_y = max(
+                    145,
+                    min(
+                        height - 42,
+                        py - 12,
+                    ),
+                )
+
+                draw.rounded_rectangle(
+                    (
+                        label_x - 7,
+                        label_y - 5,
+                        label_x + text_width + 7,
+                        label_y + 25,
+                    ),
+                    radius=10,
+                    fill=(
+                        255,
+                        255,
+                        255,
+                        220,
+                    ),
+                )
+
+                draw.text(
+                    (
+                        label_x,
+                        label_y,
+                    ),
+                    label_text,
+                    font=point_font,
+                    fill=(
+                        27,
+                        37,
+                        50,
+                        255,
+                    ),
+                )
+
+    current_pixel = nhc_lonlat_pixel(
+        current_lon,
+        current_lat,
+        bbox,
+        width,
+        height,
+    )
+
+    current_wind = (
+        nhc_wind_mph(
+            raw
+        )
+        or
+        (
+            track[0][3]
+            if track
+            else
+            None
+        )
+    )
+
+    cx, cy = current_pixel
+
+    draw.ellipse(
+        (
+            cx - 24,
+            cy - 24,
+            cx + 24,
+            cy + 24,
+        ),
+        fill=(
+            255,
+            255,
+            255,
+            248,
+        ),
+        outline=(
+            24,
+            34,
+            48,
+            255,
+        ),
+        width=2,
+    )
+
+    draw.ellipse(
+        (
+            cx - 15,
+            cy - 15,
+            cx + 15,
+            cy + 15,
+        ),
+        fill=nhc_map_marker_color(
+            current_wind
+        ),
+        outline=(
+            255,
+            255,
+            255,
+            255,
+        ),
+        width=2,
+    )
+
+    if not track:
+        bearing = nhc_movement_bearing(
+            raw
+        )
+
+        if bearing is not None:
+            nhc_draw_movement_arrow(
+                draw,
+                current_pixel,
+                bearing,
+            )
+
+    draw.rounded_rectangle(
+        (
+            26,
+            height - 52,
+            456,
+            height - 16,
+        ),
+        radius=15,
+        fill=(
+            255,
+            255,
+            255,
+            216,
+        ),
+    )
+
+    draw.text(
+        (
+            42,
+            height - 45,
+        ),
+        'Derived from official NHC advisory data',
+        font=small_font,
+        fill=(
+            58,
+            75,
+            95,
+            255,
+        ),
+    )
+
+    return save_map_image(
+        base,
+        prefix='nhc_storm_map_',
+    )
+
+
 def nhc_page_image(
     page_url: str,
 ) -> str:
@@ -8231,7 +9794,7 @@ def nhc_page_image(
 
     try:
         _text, soup = (
-            fetch_product_page(
+            fetch_nhc_product_page(
                 page_url
             )
         )
@@ -8308,6 +9871,16 @@ def nhc_page_image(
         if 'graphic' in descriptor:
             score += 10
 
+        if 'outlook' in descriptor:
+            score += 10
+
+        if (
+            'gtwo' in descriptor
+            or
+            '7d0' in descriptor
+        ):
+            score += 18
+
         if score:
             candidates.append(
                 (
@@ -8328,9 +9901,10 @@ def nhc_page_image(
     ):
         try:
             path = (
-                download_image_to_temp(
+                download_nhc_image_to_temp(
                     image_url,
                     prefix='nhc_storm_',
+                    referer=page_url,
                 )
             )
 
@@ -8444,9 +10018,14 @@ def render_nhc_two(
     if image_url:
         try:
             image_path = (
-                download_image_to_temp(
+                download_nhc_image_to_temp(
                     image_url,
                     prefix='nhc_two_',
+                    referer=(
+                        item.link
+                        or
+                        'https://www.nhc.noaa.gov/'
+                    ),
                 )
             )
 
@@ -8454,6 +10033,26 @@ def render_nhc_two(
             log.exception(
                 'Could not download '
                 'NHC graphical outlook '
+                'image for %s',
+                source,
+            )
+
+    if (
+        not image_path
+        and
+        item.link
+    ):
+        try:
+            image_path = (
+                nhc_page_image(
+                    item.link
+                )
+            )
+
+        except Exception:
+            log.exception(
+                'Could not obtain '
+                'fallback NHC outlook '
                 'image for %s',
                 source,
             )
@@ -8588,16 +10187,32 @@ def render_nhc_storm(
 
     try:
         image_path = (
-            nhc_page_image(
-                item.link
+            build_mapbox_nhc_storm_map(
+                item,
+                kind,
+                basin,
             )
         )
 
     except Exception:
         log.exception(
-            'Could not obtain '
-            'NHC storm image'
+            'Could not build '
+            'derived NHC storm map'
         )
+
+    if not image_path:
+        try:
+            image_path = (
+                nhc_page_image(
+                    item.link
+                )
+            )
+
+        except Exception:
+            log.exception(
+                'Could not obtain '
+                'NHC storm image'
+            )
 
     return RenderedPost(
         fit_post(

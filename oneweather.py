@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-27-fast-direct-mcd-nhc-allbasins-v8.9'
+BUILD_ID = '2026-08-27-fast-watch-nhc-wallet-v8.10'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -50,6 +50,7 @@ SPC_FIRE_POLL_SECONDS = max(10, int(os.getenv('SPC_FIRE_POLL_SECONDS', '20')))
 SPC_RAPID_RETRY_SECONDS = max(5, int(os.getenv('SPC_RAPID_RETRY_SECONDS', '8')))
 SPC_RAPID_RETRY_WINDOW_SECONDS = max(30, int(os.getenv('SPC_RAPID_RETRY_WINDOW_SECONDS', '120')))
 NHC_POLL_SECONDS = max(10, int(os.getenv('NHC_POLL_SECONDS', '15')))
+NHC_WALLET_SWEEP_SECONDS = max(30, int(os.getenv('NHC_WALLET_SWEEP_SECONDS', '45')))
 NHC_FULL_SWEEP_SECONDS = max(300, int(os.getenv('NHC_FULL_SWEEP_SECONDS', '600')))
 WPC_ERO_POLL_SECONDS = max(15, int(os.getenv('WPC_ERO_POLL_SECONDS', '30')))
 WPC_WINTER_POLL_SECONDS = max(30, int(os.getenv('WPC_WINTER_POLL_SECONDS', '60')))
@@ -110,6 +111,20 @@ SPC_MCD_RAW_URL = (
     'acus11.kwns.swo.mcd.txt'
 )
 
+# The SPC watch-number last digit selects the rotating SAW/WWP slot.
+# These raw AWIPS products arrive before the downstream warning GIS layer,
+# so they are the fast path for a new watch's box and probabilities.
+SPC_WATCH_SAW_URL_TEMPLATE = (
+    'https://tgftp.nws.noaa.gov/'
+    'data/raw/ww/'
+    'wwus30.kwns.saw.{slot}.txt'
+)
+SPC_WATCH_WWP_URL_TEMPLATE = (
+    'https://tgftp.nws.noaa.gov/'
+    'data/raw/ww/'
+    'wwus40.kwns.wwp.{slot}.txt'
+)
+
 NHC_TWO_FEEDS = {
     'nhc_two_atlantic': 'https://www.nhc.noaa.gov/xml/TWOAT.xml',
     'nhc_two_epac': 'https://www.nhc.noaa.gov/xml/TWOEP.xml',
@@ -126,6 +141,25 @@ NHC_BASIN_INDEX_FEEDS = {
     'atlantic': 'https://www.nhc.noaa.gov/index-at.xml',
     'epac': 'https://www.nhc.noaa.gov/index-ep.xml',
     'cpac': 'https://www.nhc.noaa.gov/index-cp.xml',
+}
+
+# Official NHC storm-wallet aggregate feeds.  The basin dynamic feeds are
+# still the fastest low-request discovery path, but these wallet feeds are
+# authoritative coverage when a basin feed is empty/intermittent (especially
+# important for eastern/central Pacific products).
+NHC_STORM_WALLET_FEEDS = {
+    'atlantic': tuple(
+        f'https://www.nhc.noaa.gov/nhc_at{wallet}.xml'
+        for wallet in range(1, 6)
+    ),
+    'epac': tuple(
+        f'https://www.nhc.noaa.gov/nhc_ep{wallet}.xml'
+        for wallet in range(1, 6)
+    ),
+    'cpac': tuple(
+        f'https://www.nhc.noaa.gov/nhc_cp{wallet}.xml'
+        for wallet in range(1, 6)
+    ),
 }
 
 NHC_BASIN_CODES = {
@@ -4579,6 +4613,87 @@ class RetryableSourceDataError(
     pass
 
 
+def fetch_nhc_rss(
+    url: str,
+) -> list[RSSItem]:
+    """Fetch an NHC RSS feed without letting a transient zero-byte reply
+    turn into a full traceback/error cycle.  NHC occasionally returns an
+    empty body to rapid clients; one cache-busted retry is enough in practice.
+    """
+    last_error: Optional[Exception] = None
+
+    for attempt in range(2):
+        candidate = url
+
+        if attempt:
+            separator = '&' if '?' in url else '?'
+            candidate = f'{url}{separator}_pw={int(time.time() * 1000)}'
+
+        try:
+            headers = nhc_browser_headers(
+                referer='https://www.nhc.noaa.gov/',
+                image=False,
+            )
+            headers.update(
+                {
+                    'Accept': 'application/rss+xml,application/xml,text/xml,*/*',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
+                }
+            )
+
+            response = http_get(
+                candidate,
+                headers=headers,
+                timeout=(6, 22),
+            )
+
+            content = response.content.strip()
+
+            if not content:
+                raise ValueError('empty NHC RSS response body')
+
+            root = ET.fromstring(content)
+            items: list[RSSItem] = []
+
+            for node in root.iter():
+                if (
+                    node.tag.rsplit('}', 1)[-1].lower()
+                    !=
+                    'item'
+                ):
+                    continue
+
+                items.append(
+                    RSSItem(
+                        title=squish(child_text(node, 'title')),
+                        link=child_text(node, 'link').strip(),
+                        guid=child_text(node, 'guid').strip(),
+                        pub_date=child_text(node, 'pubDate').strip(),
+                        description_html=child_text(node, 'description'),
+                    )
+                )
+
+            items.sort(
+                key=lambda item:
+                    item.published
+                    or
+                    datetime(1970, 1, 1, tzinfo=timezone.utc)
+            )
+
+            return items
+
+        except Exception as exc:
+            last_error = exc
+
+            if attempt == 0:
+                time.sleep(0.25)
+
+    raise RetryableSourceDataError(
+        f'NHC RSS temporarily unavailable at {url}: {last_error}'
+    )
+
+
 SPC_OUTLOOK_MAPSERVER = (
     'https://mapservices.weather.noaa.gov/'
     'vector/rest/services/'
@@ -8002,10 +8117,24 @@ def build_mapbox_watch_outline_map(
     width = 1200
     height = 760
 
+    spatial_reference = (
+        geometry.get('spatialReference')
+        or
+        {}
+    )
+
+    default_wkid = int(
+        spatial_reference.get('latestWkid')
+        or
+        spatial_reference.get('wkid')
+        or
+        3857
+    )
+
     points = (
         mercator_points_from_arcgis_geometry(
             geometry,
-            default_wkid=3857,
+            default_wkid=default_wkid,
         )
     )
 
@@ -8036,7 +8165,7 @@ def build_mapbox_watch_outline_map(
             base,
             geometry,
             bbox,
-            default_wkid=3857,
+            default_wkid=default_wkid,
             line_width=7,
         )
     )
@@ -8795,6 +8924,98 @@ def find_matching_mcd_feature(
     return candidates[-1]
 
 
+def fetch_spc_watch_saw_feature(
+    number: str,
+) -> Optional[SPCGeometryMatch]:
+    target = digits_only(
+        number
+    ).lstrip('0')
+
+    if not target:
+        return None
+
+    slot = int(target) % 10
+    url = SPC_WATCH_SAW_URL_TEMPLATE.format(
+        slot=slot
+    )
+
+    try:
+        raw = http_get(
+            url,
+            headers={
+                'Accept': 'text/plain,*/*',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+            },
+            timeout=(5, 15),
+        ).text
+
+    except Exception:
+        return None
+
+    watch_match = re.search(
+        r'(?im)^\s*WW\s+0*(\d{1,4})\b',
+        raw,
+    )
+
+    if (
+        not watch_match
+        or
+        watch_match.group(1).lstrip('0') != target
+    ):
+        return None
+
+    geometry = spc_latlon_polygon_geometry(
+        raw
+    )
+
+    if not geometry:
+        return None
+
+    attrs: dict[str, Any] = {
+        'source': 'official_tgftp_saw',
+        'event': target,
+    }
+
+    issued_at = spc_product_issuance_datetime(
+        raw,
+        utcnow(),
+    )
+
+    if issued_at is not None:
+        attrs['issuance'] = iso_z(
+            issued_at
+        )
+
+    valid_match = re.search(
+        r'\b(\d{6})Z\s*-\s*(\d{6})Z\b',
+        raw,
+        re.I,
+    )
+
+    if valid_match:
+        start = spc_resolve_ddhhmm(
+            valid_match.group(1),
+            issued_at or utcnow(),
+        )
+        end = spc_resolve_ddhhmm(
+            valid_match.group(2),
+            issued_at or utcnow(),
+        )
+
+        if start is not None:
+            attrs['onset'] = iso_z(start)
+
+        if end is not None:
+            attrs['expiration'] = iso_z(end)
+            attrs['ends'] = iso_z(end)
+
+    return SPCGeometryMatch(
+        attrs,
+        geometry,
+    )
+
+
 def find_matching_watch_feature(
     product_name: str,
     number: str,
@@ -9213,6 +9434,42 @@ def fetch_watch_probabilities(
             'Watch number was unavailable '
             'for probability lookup'
         )
+
+    # Fast path: the rotating WWP raw product is issued with the watch and
+    # normally reaches TGFTP before the NWS Products API index catches up.
+    try:
+        slot = int(target) % 10
+        raw_wwp = http_get(
+            SPC_WATCH_WWP_URL_TEMPLATE.format(
+                slot=slot
+            ),
+            headers={
+                'Accept': 'text/plain,*/*',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+            },
+            timeout=(5, 15),
+        ).text
+
+        raw_watch_match = re.search(
+            r'(?im)\b(?:WS|WW)\s+0*(\d{1,4})\b',
+            raw_wwp,
+        )
+
+        if (
+            raw_watch_match
+            and
+            raw_watch_match.group(1).lstrip('0') == target
+        ):
+            parsed_direct = parse_watch_probabilities(
+                raw_wwp
+            )
+
+            if parsed_direct:
+                return parsed_direct
+
+    except Exception:
+        pass
 
     response = http_get(
         NWS_PRODUCTS_URL,
@@ -10232,19 +10489,26 @@ def render_spc(
             )
 
     elif kind == 'watch':
-        match = (
-            find_matching_watch_feature(
-                product_name,
-                number,
-            )
+        # Do not wait on the downstream WWA ArcGIS layer.  SPC's SAW raw
+        # product carries the official watch-box LAT...LON coordinates at
+        # issuance; GIS remains only a fallback for the exact county union.
+        match = fetch_spc_watch_saw_feature(
+            number
         )
+
+        if not match:
+            match = (
+                find_matching_watch_feature(
+                    product_name,
+                    number,
+                )
+            )
 
         if not match:
             raise RetryableSourceDataError(
                 f'Watch '
                 f'{number or product_name} '
-                'polygon GIS data '
-                'was not ready yet'
+                'had no usable SAW polygon or GIS fallback yet'
             )
 
         probabilities = (
@@ -15666,6 +15930,12 @@ def nhc_product_logical_key(
         ''
     )
 
+    time_token = (
+        wmo_stamp
+        or
+        published
+    )
+
     identity = '|'.join(
         (
             'nhc',
@@ -15675,13 +15945,138 @@ def nhc_product_logical_key(
                 storm
             ),
             advisory,
-            wmo_stamp,
-            published,
+            time_token,
         )
     )
 
     return sha256_text(
         identity
+    )
+
+
+def nhc_collect_basin_items(
+    db: StateDB,
+    basin: str,
+    index_url: str,
+) -> list[RSSItem]:
+    items: list[RSSItem] = []
+    dynamic_items: list[RSSItem] = []
+
+    try:
+        dynamic_items = fetch_nhc_rss(
+            index_url
+        )
+        items.extend(
+            dynamic_items
+        )
+
+    except RetryableSourceDataError as exc:
+        log.info(
+            'NHC %s dynamic basin feed temporarily unavailable: %s',
+            basin,
+            exc,
+        )
+
+    # If the basin feed is empty, immediately scan the official storm-wallet
+    # feeds.  Even when it works, do a periodic wallet sweep so a Pacific
+    # product can never disappear just because the basin aggregate lagged.
+    sweep_key = (
+        f'nhc:wallet-sweep:{basin}'
+    )
+
+    try:
+        last_sweep = float(
+            db.get_meta(
+                sweep_key,
+                '0',
+            )
+            or
+            '0'
+        )
+    except ValueError:
+        last_sweep = 0.0
+
+    now_ts = time.time()
+    wallet_due = (
+        not dynamic_items
+        or
+        now_ts - last_sweep >= NHC_WALLET_SWEEP_SECONDS
+    )
+
+    if wallet_due:
+        any_wallet_response = False
+
+        for wallet_url in NHC_STORM_WALLET_FEEDS.get(
+            basin,
+            (),
+        ):
+            try:
+                wallet_items = fetch_nhc_rss(
+                    wallet_url
+                )
+                any_wallet_response = True
+                items.extend(
+                    wallet_items
+                )
+
+            except requests.HTTPError as exc:
+                if getattr(
+                    exc.response,
+                    'status_code',
+                    None,
+                ) in {
+                    404,
+                    410,
+                }:
+                    continue
+
+                log.info(
+                    'NHC %s wallet feed unavailable: %s',
+                    basin,
+                    wallet_url,
+                )
+
+            except RetryableSourceDataError:
+                # One inactive/intermittent wallet must never block the rest.
+                continue
+
+            except Exception:
+                continue
+
+        if any_wallet_response:
+            db.set_meta(
+                sweep_key,
+                str(now_ts),
+            )
+
+    # The same official product can appear in both the basin feed and a storm
+    # wallet.  Deduplicate by its own RSS identity before product-level keying.
+    deduped: dict[str, RSSItem] = {}
+
+    for item in items:
+        identity = (
+            item.guid
+            or
+            item.link
+            or
+            item.key
+        )
+
+        existing = deduped.get(
+            identity
+        )
+
+        if (
+            existing is None
+            or
+            len(item.multiline_text) > len(existing.multiline_text)
+        ):
+            deduped[
+                identity
+            ] = item
+
+    return list(
+        deduped.values()
     )
 
 
@@ -15691,17 +16086,16 @@ def poll_nhc_basin_feed(
     basin: str,
     url: str,
 ) -> None:
-    items = fetch_rss(
-        url
+    items = nhc_collect_basin_items(
+        db,
+        basin,
+        url,
     )
 
-    prepared: list[
-        tuple[
-            str,
-            RSSItem,
-            str,
-        ]
-    ] = []
+    prepared_by_key: dict[
+        str,
+        tuple[RSSItem, str],
+    ] = {}
 
     for item in items:
         if not nhc_item_is_real(
@@ -15716,22 +16110,48 @@ def poll_nhc_basin_feed(
         if not kind:
             continue
 
+        # Hydration before logical keying gives us the real WMO timestamp and
+        # advisory number when a basin/wallet item only carries a short teaser.
+        hydrated = nhc_hydrate_product_item(
+            item
+        )
+
         key = nhc_product_logical_key(
-            item,
+            hydrated,
             kind,
             basin,
         )
 
-        prepared.append(
-            (
-                key,
-                item,
-                kind,
-            )
+        existing = prepared_by_key.get(
+            key
         )
 
+        if (
+            existing is None
+            or
+            len(hydrated.multiline_text)
+            >
+            len(existing[0].multiline_text)
+        ):
+            prepared_by_key[
+                key
+            ] = (
+                hydrated,
+                kind,
+            )
+
+    prepared = [
+        (
+            key,
+            row[0],
+            row[1],
+        )
+        for key, row
+        in prepared_by_key.items()
+    ]
+
     state_source = (
-        f'nhc_basin_products_v89:{basin}'
+        f'nhc_basin_products_v810:{basin}'
     )
 
     if not db.source_primed(
@@ -15776,9 +16196,7 @@ def poll_nhc_basin_feed(
         if (
             current_status
             and
-            current_status
-            !=
-            'rejected'
+            current_status != 'rejected'
         ):
             continue
 
@@ -16127,9 +16545,10 @@ def poll_nhc(
                 source,
             )
 
-    # The official basin-wide dynamic feeds cover Atlantic, Eastern Pacific,
-    # and Central Pacific active-cyclone text products.  Polling them directly
-    # avoids waiting for the old index-fingerprint -> wallet sweep chain.
+    # Poll the official basin aggregate first, with storm-wallet feeds folded
+    # in automatically whenever the aggregate is empty/intermittent and on a
+    # periodic safety sweep.  This covers Atlantic, eastern Pacific and
+    # central Pacific without treating zero-byte NHC replies as hard failures.
     for basin, index_url in NHC_BASIN_INDEX_FEEDS.items():
         try:
             poll_nhc_basin_feed(
@@ -16141,22 +16560,9 @@ def poll_nhc(
 
         except Exception:
             log.exception(
-                'NHC dynamic basin feed failed for %s; trying wallet fallback',
+                'NHC basin product poll failed for %s',
                 basin,
             )
-
-            try:
-                nhc_sweep_basin(
-                    db,
-                    x,
-                    basin,
-                )
-
-            except Exception:
-                log.exception(
-                    'NHC wallet fallback also failed for %s',
-                    basin,
-                )
 
 
 def fetch_nws_alerts_since(

@@ -6835,7 +6835,7 @@ def fetch_watch_probabilities(
         )
 
         watch_match = re.search(
-            r'\b(?:WT|WATCH)\s+'
+            r'\b(?:WT|WS|WATCH)\s+'
             r'0*(\d{1,4})\b',
             text,
             re.I,

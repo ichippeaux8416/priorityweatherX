@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-27-nhc-per-system-bright-v8.6'
+BUILD_ID = '2026-08-27-spc-fast-cycle-dedup-v8.7'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -43,6 +43,8 @@ INCLUDE_SOURCE_URLS = os.getenv('INCLUDE_SOURCE_URLS', 'false').lower() in {'1',
 POST_TEXT_LIMIT = max(1000, min(25000, int(os.getenv('POST_TEXT_LIMIT', '25000'))))
 NWS_POLL_SECONDS = max(30, int(os.getenv('NWS_POLL_SECONDS', '30')))
 SPC_POLL_SECONDS = max(30, int(os.getenv('SPC_POLL_SECONDS', '60')))
+SPC_RAPID_RETRY_SECONDS = max(5, int(os.getenv('SPC_RAPID_RETRY_SECONDS', '10')))
+SPC_RAPID_RETRY_WINDOW_SECONDS = max(30, int(os.getenv('SPC_RAPID_RETRY_WINDOW_SECONDS', '120')))
 NHC_POLL_SECONDS = max(30, int(os.getenv('NHC_POLL_SECONDS', '60')))
 NHC_FULL_SWEEP_SECONDS = max(300, int(os.getenv('NHC_FULL_SWEEP_SECONDS', '600')))
 WPC_ERO_POLL_SECONDS = max(60, int(os.getenv('WPC_ERO_POLL_SECONDS', '120')))
@@ -4750,56 +4752,204 @@ def spc_convective_risk_location(
         r'(?:Marginal|Slight|Enhanced|Moderate|High)'
     )
 
-    patterns = [
-        (
-            rf'THERE IS (?:AN?|A)\s+'
-            rf'{category_pattern}\s+'
-            r'RISK OF SEVERE THUNDERSTORMS\s+'
-            r'(?:ACROSS|FOR)\s+'
-            r'(.+?)'
-            r'(?=\.\.\.|\.(?:\s|$)|$)'
-        ),
-        (
-            rf'{category_pattern}\s+'
-            r'RISK OF SEVERE THUNDERSTORMS\s+'
-            r'(?:ACROSS|FOR)\s+'
-            r'(.+?)'
-            r'(?=\.\.\.|\.(?:\s|$)|$)'
-        ),
-    ]
+    pattern = (
+        r'\.\.\.\s*'
+        r'THERE IS (?:AN?|A)\s+'
+        rf'{category_pattern}\s+'
+        r'RISK OF SEVERE THUNDERSTORMS\s+'
+        r'(.+?)'
+        r'(?='
+        r'\.\.\.\s*THERE IS\s+'
+        r'|'
+        r'\.\.\.\s*SUMMARY\s*\.\.\.'
+        r'|$'
+        r')'
+    )
 
-    for pattern in patterns:
-        match = re.search(
-            pattern,
+    matches = re.findall(
+        pattern,
+        flat,
+        re.I,
+    )
+
+    if not matches:
+        fallback_pattern = (
+            r'THERE IS (?:AN?|A)\s+'
+            rf'{category_pattern}\s+'
+            r'RISK OF SEVERE THUNDERSTORMS\s+'
+            r'(.+?)'
+            r'(?='
+            r'\.\.\.\s*THERE IS\s+'
+            r'|'
+            r'\.\.\.\s*SUMMARY\s*\.\.\.'
+            r'|$'
+            r')'
+        )
+
+        matches = re.findall(
+            fallback_pattern,
             flat,
             re.I,
         )
 
-        if not match:
-            continue
+    regions: list[str] = []
 
-        region = smart_title_region(
-            match.group(
-                1
-            )
+    for raw_region in matches:
+        region = squish(
+            raw_region
+        ).strip(
+            ' .;:-'
         )
 
-        if (
-            region
-            and
-            region.lower()
-            not in {
-                'the',
-                'parts',
-                'portions',
-            }
-        ):
-            return truncate(
-                region,
-                220,
+        region = re.sub(
+            r'(?i)\.\.\.\s*AND\s+ALSO\s+(?:ACROSS|FOR|OVER|INTO|FROM)?\s*',
+            '; ',
+            region,
+        )
+
+        region = re.sub(
+            r'(?i)\.\.\.\s*AND\s+(?:ALSO\s+)?(?:ACROSS|FOR|OVER|INTO|FROM)?\s*',
+            '; ',
+            region,
+        )
+
+        region = re.sub(
+            r'\.\.\.+',
+            '; ',
+            region,
+        )
+
+        region = re.sub(
+            r'(?i)^'
+            r'(?:ACROSS|FOR|OVER|INTO|FROM)\s+',
+            '',
+            region,
+        )
+
+        region = re.sub(
+            r'(?i)^'
+            r'(?:PARTS?|PORTIONS?)\s+OF\s+(?:THE\s+)?',
+            '',
+            region,
+        )
+
+        region = re.sub(
+            r'(?i);\s*'
+            r'(?:AND\s+)?(?:ALSO\s+)?'
+            r'(?:ACROSS|FOR|OVER|INTO|FROM)\s+',
+            '; ',
+            region,
+        )
+
+        region = re.sub(
+            r'(?i);\s*'
+            r'(?:PARTS?|PORTIONS?)\s+OF\s+(?:THE\s+)?',
+            '; ',
+            region,
+        )
+
+        region = re.sub(
+            r'(?i);\s*'
+            r'(?:AND\s+)?(?:ALSO\s+)?'
+            r'(?:ACROSS|FOR|OVER|INTO|FROM)\s+'
+            r'(?:PARTS?|PORTIONS?)\s+OF\s+(?:THE\s+)?',
+            '; ',
+            region,
+        )
+
+        region = re.sub(
+            r'\s*;\s*',
+            '; ',
+            region,
+        )
+
+        region = re.sub(
+            r'\s+',
+            ' ',
+            region,
+        ).strip(
+            ' ,;.'
+        )
+
+        if not region:
+            continue
+
+        if region.upper() == region:
+            words = region.split(
+                ' '
             )
 
-    return ''
+            formatted_words: list[str] = []
+
+            for word in words:
+                prefix = ''
+                suffix = ''
+                core = word
+
+                while core and core[0] in '([":':
+                    prefix += core[0]
+                    core = core[1:]
+
+                while core and core[-1] in ',.;:)]':
+                    suffix = core[-1] + suffix
+                    core = core[:-1]
+
+                if (
+                    re.fullmatch(
+                        r'[A-Z]{2,3}',
+                        core,
+                    )
+                    and
+                    core not in {
+                        'THE',
+                        'AND',
+                        'FOR',
+                        'FROM',
+                        'INTO',
+                    }
+                ):
+                    styled = core
+                else:
+                    styled = core.title()
+
+                formatted_words.append(
+                    prefix
+                    +
+                    styled
+                    +
+                    suffix
+                )
+
+            region = ' '.join(
+                formatted_words
+            )
+
+            for word in (
+                ' And ',
+                ' Of ',
+                ' The ',
+                ' In ',
+                ' Across ',
+                ' Near ',
+                ' Into ',
+                ' From ',
+            ):
+                region = region.replace(
+                    word,
+                    word.lower(),
+                )
+
+        if region not in regions:
+            regions.append(
+                region
+            )
+
+    return truncate(
+        '; '.join(
+            regions
+        ),
+        320,
+    )
 
 
 def format_spc_issue_z(
@@ -4831,7 +4981,527 @@ def format_spc_issue_z(
         .strftime(
             '%H%MZ'
         )
-        .lower()
+        .upper()
+    )
+
+
+def spc_outlook_cycle_z(
+    item: RSSItem,
+    day: int,
+    page_text: str,
+) -> str:
+    title_candidates = [
+        item.title,
+        item.guid,
+    ]
+
+    for candidate in title_candidates:
+        if not candidate:
+            continue
+
+        patterns = [
+            (
+                r'\b(\d{4})\s*'
+                r'(?:UTC|Z)\b'
+                r'.{0,80}?'
+                rf'\bDay\s*{day}\b'
+            ),
+            (
+                rf'\bDay\s*{day}\b'
+                r'.{0,80}?'
+                r'\b(\d{4})\s*'
+                r'(?:UTC|Z)\b'
+            ),
+        ]
+
+        for pattern in patterns:
+            match = re.search(
+                pattern,
+                candidate,
+                re.I,
+            )
+
+            if not match:
+                continue
+
+            clock = match.group(
+                1
+            )
+
+            hour = int(
+                clock[:2]
+            )
+
+            minute = int(
+                clock[2:]
+            )
+
+            if (
+                0 <= hour <= 23
+                and
+                0 <= minute <= 59
+            ):
+                return (
+                    f'{hour:02d}'
+                    f'{minute:02d}Z'
+                )
+
+    wmo_match = re.search(
+        r'(?im)^\s*SPC\s+AC\s+'
+        r'(\d{2})(\d{2})(\d{2})\b',
+        page_text,
+    )
+
+    if wmo_match:
+        hour = int(
+            wmo_match.group(
+                2
+            )
+        )
+
+        minute = int(
+            wmo_match.group(
+                3
+            )
+        )
+
+        actual_minutes = (
+            hour
+            *
+            60
+            +
+            minute
+        )
+
+        scheduled_by_day = {
+            1: (
+                60,
+                360,
+                780,
+                990,
+                1200,
+            ),
+            2: (
+                360,
+                1050,
+            ),
+            3: (
+                450,
+            ),
+        }
+
+        scheduled = scheduled_by_day.get(
+            day
+        )
+
+        if scheduled:
+            def circular_distance(
+                target: int,
+            ) -> int:
+                difference = abs(
+                    actual_minutes
+                    -
+                    target
+                )
+
+                return min(
+                    difference,
+                    1440
+                    -
+                    difference,
+                )
+
+            nearest = min(
+                scheduled,
+                key=circular_distance,
+            )
+
+            if circular_distance(
+                nearest
+            ) <= 90:
+                return (
+                    f'{nearest // 60:02d}'
+                    f'{nearest % 60:02d}Z'
+                )
+
+        return (
+            f'{hour:02d}'
+            f'{minute:02d}Z'
+        )
+
+    if item.published:
+        return item.published.strftime(
+            '%H%MZ'
+        )
+
+    return ''
+
+
+def spc_resolve_ddhhmm(
+    stamp: str,
+    reference: Optional[datetime],
+) -> Optional[datetime]:
+    if not re.fullmatch(
+        r'\d{6}',
+        stamp,
+    ):
+        return None
+
+    day = int(
+        stamp[:2]
+    )
+
+    hour = int(
+        stamp[2:4]
+    )
+
+    minute = int(
+        stamp[4:6]
+    )
+
+    if (
+        hour > 23
+        or
+        minute > 59
+    ):
+        return None
+
+    ref = (
+        reference.astimezone(
+            timezone.utc
+        )
+        if reference
+        else
+        utcnow()
+    )
+
+    candidates: list[datetime] = []
+
+    for month_offset in (
+        -1,
+        0,
+        1,
+    ):
+        year = ref.year
+        month = (
+            ref.month
+            +
+            month_offset
+        )
+
+        while month < 1:
+            month += 12
+            year -= 1
+
+        while month > 12:
+            month -= 12
+            year += 1
+
+        try:
+            candidates.append(
+                datetime(
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    tzinfo=timezone.utc,
+                )
+            )
+
+        except ValueError:
+            continue
+
+    if not candidates:
+        return None
+
+    return min(
+        candidates,
+        key=lambda value:
+            abs(
+                (
+                    value
+                    -
+                    ref
+                ).total_seconds()
+            ),
+    )
+
+
+def spc_outlook_valid_start(
+    page_text: str,
+    reference: Optional[datetime],
+) -> Optional[datetime]:
+    match = re.search(
+        r'(?i)\bVALID\s+'
+        r'(\d{6})Z\s*[-–]',
+        page_text,
+    )
+
+    if not match:
+        return None
+
+    return spc_resolve_ddhhmm(
+        match.group(
+            1
+        ),
+        reference,
+    )
+
+
+def spc_arcgis_datetime(
+    value: Any,
+) -> Optional[datetime]:
+    text = squish(
+        str(
+            value
+            or
+            ''
+        )
+    )
+
+    compact_formats = {
+        10: '%Y%m%d%H',
+        12: '%Y%m%d%H%M',
+        14: '%Y%m%d%H%M%S',
+    }
+
+    fmt = compact_formats.get(
+        len(
+            text
+        )
+    )
+
+    if (
+        fmt
+        and
+        text.isdigit()
+        and
+        text.startswith(
+            (
+                '19',
+                '20',
+            )
+        )
+    ):
+        try:
+            return datetime.strptime(
+                text,
+                fmt,
+            ).replace(
+                tzinfo=timezone.utc
+            )
+
+        except ValueError:
+            pass
+
+    return arcgis_datetime(
+        value
+    )
+
+
+def spc_feature_valid_datetime(
+    feature: dict[str, Any],
+) -> Optional[datetime]:
+    attrs = (
+        feature.get(
+            'attributes'
+        )
+        or
+        {}
+    )
+
+    for key in (
+        'valid',
+        'valid_time',
+        'start_time',
+    ):
+        dt = spc_arcgis_datetime(
+            attrs.get(
+                key
+            )
+        )
+
+        if dt is not None:
+            return dt
+
+    return None
+
+
+def spc_filter_features_for_valid(
+    features: list[dict[str, Any]],
+    expected_valid: Optional[datetime],
+    *,
+    day: int,
+    layer_name: str,
+) -> list[dict[str, Any]]:
+    if expected_valid is None:
+        return features
+
+    dated = [
+        (
+            feature,
+            spc_feature_valid_datetime(
+                feature
+            ),
+        )
+        for feature
+        in features
+    ]
+
+    parseable = [
+        (
+            feature,
+            valid
+        )
+        for feature, valid
+        in dated
+        if valid is not None
+    ]
+
+    if not parseable:
+        return features
+
+    tolerance = timedelta(
+        minutes=20
+    )
+
+    matched = [
+        feature
+        for feature, valid
+        in parseable
+        if abs(
+            valid
+            -
+            expected_valid
+        )
+        <=
+        tolerance
+    ]
+
+    if not matched:
+        newest = max(
+            valid
+            for _feature, valid
+            in parseable
+        )
+
+        raise RetryableSourceDataError(
+            f'SPC Day {day} {layer_name} GIS layer '
+            f'is still on valid {newest:%d%H%MZ}; '
+            f'waiting for {expected_valid:%d%H%MZ}'
+        )
+
+    return matched
+
+
+def spc_convective_logical_key(
+    item: RSSItem,
+) -> str:
+    day = spc_day_number(
+        item
+    )
+
+    title = item.title
+
+    date_match = re.search(
+        r'(?i)\b'
+        r'(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|'
+        r'May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|'
+        r'Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)'
+        r'\s+(\d{1,2}),\s+(\d{4})\b',
+        title,
+    )
+
+    cycle_match = re.search(
+        r'\b(\d{4})\s*(?:UTC|Z)\b',
+        title,
+        re.I,
+    )
+
+    date_token = ''
+
+    if date_match:
+        try:
+            parsed_date = datetime.strptime(
+                ' '.join(
+                    (
+                        date_match.group(
+                            1
+                        )[:3],
+                        date_match.group(
+                            2
+                        ),
+                        date_match.group(
+                            3
+                        ),
+                    )
+                ),
+                '%b %d %Y',
+            )
+
+            date_token = parsed_date.strftime(
+                '%Y%m%d'
+            )
+
+        except Exception:
+            date_token = ''
+
+    if (
+        not date_token
+        and
+        item.published
+    ):
+        date_token = item.published.strftime(
+            '%Y%m%d'
+        )
+
+    cycle_token = (
+        cycle_match.group(
+            1
+        )
+        if cycle_match
+        else
+        ''
+    )
+
+    if (
+        date_token
+        and
+        cycle_token
+    ):
+        identity = (
+            f'day{day}|'
+            f'{date_token}|'
+            f'{cycle_token}'
+        )
+
+    else:
+        wmo_match = re.search(
+            r'(?im)^\s*SPC\s+AC\s+'
+            r'(\d{6})\b',
+            item.multiline_text,
+        )
+
+        identity = (
+            f'day{day}|'
+            +
+            (
+                wmo_match.group(
+                    1
+                )
+                if wmo_match
+                else
+                item.guid
+                or
+                item.link
+                or
+                item.key
+            )
+        )
+
+    return sha256_text(
+        identity
     )
 
 
@@ -5475,6 +6145,8 @@ def add_reference_boundaries(
     *,
     counties: bool,
     states: bool = True,
+    state_halo_width: int = 7,
+    state_line_width: int = 5,
 ) -> Image.Image:
     width, height = (
         base.size
@@ -5535,6 +6207,16 @@ def add_reference_boundaries(
                 'RGBA',
             )
 
+            halo_width = max(
+                state_line_width + 1,
+                state_halo_width,
+            )
+
+            line_width = max(
+                1,
+                state_line_width,
+            )
+
             for feature in state_features:
                 geometry = (
                     feature.get(
@@ -5580,7 +6262,7 @@ def add_reference_boundaries(
                             255,
                             235,
                         ),
-                        width=7,
+                        width=halo_width,
                         joint='curve',
                     )
 
@@ -5592,7 +6274,7 @@ def add_reference_boundaries(
                             0,
                             255,
                         ),
-                        width=5,
+                        width=line_width,
                         joint='curve',
                     )
 
@@ -6540,6 +7222,8 @@ def build_mapbox_spc_outlook_map(
         bbox,
         counties=False,
         states=True,
+        state_halo_width=5,
+        state_line_width=3,
     )
 
     return save_map_image(
@@ -6630,6 +7314,8 @@ def build_mapbox_wpc_ero_map(
         bbox,
         counties=False,
         states=True,
+        state_halo_width=5,
+        state_line_width=3,
     )
 
     return save_map_image(
@@ -7497,6 +8183,7 @@ def format_datetime_in_abbrev(
 
 def load_convective_snapshot(
     day: int,
+    expected_valid: Optional[datetime] = None,
 ) -> SPCConvectiveSnapshot:
     layer_ids = (
         SPC_OUTLOOK_LAYER_IDS.get(
@@ -7546,6 +8233,15 @@ def load_convective_snapshot(
             f'SPC Day {day} GIS data '
             'was not ready yet'
         )
+
+    category_features = (
+        spc_filter_features_for_valid(
+            category_features,
+            expected_valid,
+            day=day,
+            layer_name='categorical',
+        )
+    )
 
     category = (
         spc_max_label(
@@ -7601,7 +8297,7 @@ def load_convective_snapshot(
         1,
         2,
     ):
-        tornado_risk = spc_max_label(
+        tornado_features = (
             arcgis_query_features(
                 SPC_OUTLOOK_MAPSERVER,
                 layer_ids[
@@ -7610,13 +8306,14 @@ def load_convective_snapshot(
                 out_fields=(
                     'objectid,dn,label,'
                     'label2,issue,valid,'
+                    'idp_filedate,'
                     'idp_ingestdate'
                 ),
                 return_geometry=False,
             )
         )
 
-        hail_risk = spc_max_label(
+        hail_features = (
             arcgis_query_features(
                 SPC_OUTLOOK_MAPSERVER,
                 layer_ids[
@@ -7625,13 +8322,14 @@ def load_convective_snapshot(
                 out_fields=(
                     'objectid,dn,label,'
                     'label2,issue,valid,'
+                    'idp_filedate,'
                     'idp_ingestdate'
                 ),
                 return_geometry=False,
             )
         )
 
-        wind_risk = spc_max_label(
+        wind_features = (
             arcgis_query_features(
                 SPC_OUTLOOK_MAPSERVER,
                 layer_ids[
@@ -7640,10 +8338,50 @@ def load_convective_snapshot(
                 out_fields=(
                     'objectid,dn,label,'
                     'label2,issue,valid,'
+                    'idp_filedate,'
                     'idp_ingestdate'
                 ),
                 return_geometry=False,
             )
+        )
+
+        tornado_features = (
+            spc_filter_features_for_valid(
+                tornado_features,
+                expected_valid,
+                day=day,
+                layer_name='tornado',
+            )
+        )
+
+        hail_features = (
+            spc_filter_features_for_valid(
+                hail_features,
+                expected_valid,
+                day=day,
+                layer_name='hail',
+            )
+        )
+
+        wind_features = (
+            spc_filter_features_for_valid(
+                wind_features,
+                expected_valid,
+                day=day,
+                layer_name='wind',
+            )
+        )
+
+        tornado_risk = spc_max_label(
+            tornado_features
+        )
+
+        hail_risk = spc_max_label(
+            hail_features
+        )
+
+        wind_risk = spc_max_label(
+            wind_features
         )
 
         if not any(
@@ -7660,7 +8398,7 @@ def load_convective_snapshot(
             )
 
     elif day == 3:
-        severe_risk = spc_max_label(
+        severe_features = (
             arcgis_query_features(
                 SPC_OUTLOOK_MAPSERVER,
                 layer_ids[
@@ -7669,10 +8407,24 @@ def load_convective_snapshot(
                 out_fields=(
                     'objectid,dn,label,'
                     'label2,issue,valid,'
+                    'idp_filedate,'
                     'idp_ingestdate'
                 ),
                 return_geometry=False,
             )
+        )
+
+        severe_features = (
+            spc_filter_features_for_valid(
+                severe_features,
+                expected_valid,
+                day=day,
+                layer_name='severe',
+            )
+        )
+
+        severe_risk = spc_max_label(
+            severe_features
         )
 
         if not severe_risk:
@@ -7809,9 +8561,18 @@ def render_spc(
             item
         )
 
+        expected_valid = (
+            spc_outlook_valid_start(
+                page_text,
+                item.published,
+            )
+        )
+
         snapshot = (
             load_convective_snapshot(
-                day
+                day,
+                expected_valid=
+                    expected_valid,
             )
         )
 
@@ -7819,9 +8580,10 @@ def render_spc(
             snapshot.image_path
         )
 
-        issue_z = format_spc_issue_z(
-            snapshot.issued,
-            item.published,
+        issue_z = spc_outlook_cycle_z(
+            item,
+            day,
+            page_text,
         )
 
         risk_region = spc_convective_risk_location(
@@ -8156,6 +8918,211 @@ def render_spc(
     )
 
 
+def poll_spc_convective_source(
+    db: StateDB,
+    x: XPublisher,
+    source: str,
+    url: str,
+) -> None:
+    accepted = [
+        item
+        for item
+        in fetch_rss(
+            url
+        )
+        if spc_item_is_real(
+            item,
+            'convective',
+        )
+    ]
+
+    state_source = (
+        f'{source}:logical_cycle_v87'
+    )
+
+    by_key: dict[
+        str,
+        RSSItem,
+    ] = {}
+
+    for item in accepted:
+        key = spc_convective_logical_key(
+            item
+        )
+
+        existing = by_key.get(
+            key
+        )
+
+        if (
+            existing is None
+            or
+            (
+                item.published
+                or
+                datetime(
+                    1970,
+                    1,
+                    1,
+                    tzinfo=timezone.utc,
+                )
+            )
+            >
+            (
+                existing.published
+                or
+                datetime(
+                    1970,
+                    1,
+                    1,
+                    tzinfo=timezone.utc,
+                )
+            )
+        ):
+            by_key[
+                key
+            ] = item
+
+    prepared = sorted(
+        by_key.items(),
+        key=lambda pair:
+            pair[1].published
+            or
+            datetime(
+                1970,
+                1,
+                1,
+                tzinfo=timezone.utc,
+            ),
+    )
+
+    if not db.source_primed(
+        state_source
+    ):
+        for key, _item in prepared:
+            db.mark_seen_without_post(
+                state_source,
+                key,
+            )
+
+        db.mark_source_primed(
+            state_source
+        )
+
+        log.info(
+            'Primed %s with %d '
+            'existing logical SPC '
+            'outlook cycle(s)',
+            state_source,
+            len(
+                prepared
+            ),
+        )
+
+        return
+
+    for key, item in prepared:
+        current_status = db.status(
+            state_source,
+            key,
+        )
+
+        if (
+            current_status
+            and
+            current_status
+            !=
+            'rejected'
+        ):
+            continue
+
+        deadline = (
+            time.monotonic()
+            +
+            SPC_RAPID_RETRY_WINDOW_SECONDS
+        )
+
+        attempt = 0
+
+        while not STOP_REQUESTED:
+            post: Optional[
+                RenderedPost
+            ] = None
+
+            try:
+                try:
+                    post = render_spc(
+                        item,
+                        'convective',
+                    )
+
+                except RetryableSourceDataError as exc:
+                    attempt += 1
+
+                    remaining = (
+                        deadline
+                        -
+                        time.monotonic()
+                    )
+
+                    if remaining <= 0:
+                        log.info(
+                            'Deferred %s %s after '
+                            '%d rapid attempt(s): %s',
+                            state_source,
+                            key[:16],
+                            attempt,
+                            exc,
+                        )
+
+                        break
+
+                    wait_seconds = min(
+                        float(
+                            SPC_RAPID_RETRY_SECONDS
+                        ),
+                        remaining,
+                    )
+
+                    log.info(
+                        'SPC outlook GIS not synchronized yet; '
+                        'rapid retry %d in %.0fs: %s',
+                        attempt,
+                        wait_seconds,
+                        exc,
+                    )
+
+                    time.sleep(
+                        wait_seconds
+                    )
+
+                    continue
+
+                if not post:
+                    db.mark_seen_without_post(
+                        state_source,
+                        key,
+                        status='ignored',
+                    )
+
+                    break
+
+                publish_once(
+                    db,
+                    x,
+                    state_source,
+                    key,
+                    post,
+                )
+
+                break
+
+            finally:
+                cleanup_post(
+                    post
+                )
+
+
 def poll_spc(
     db: StateDB,
     x: XPublisher,
@@ -8165,6 +9132,16 @@ def poll_spc(
         kind,
     ) in SPC_FEEDS.items():
         try:
+            if kind == 'convective':
+                poll_spc_convective_source(
+                    db,
+                    x,
+                    source,
+                    url,
+                )
+
+                continue
+
             process_rss_source(
                 db,
                 x,
@@ -8190,6 +9167,10 @@ def poll_spc(
                 source,
             )
 
+
+# ---------------------------------------------------------------------------
+# Everything below this point is unchanged from the v8.6 file you supplied.
+# ---------------------------------------------------------------------------
 
 def build_nhc_basin_sources(
     basin: str,

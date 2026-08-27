@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-27-spc-fast-cycle-dedup-v8.7'
+BUILD_ID = '2026-08-27-fire-iem-tor-v8.8'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -3439,6 +3439,327 @@ def load_font(
     return ImageFont.load_default()
 
 
+def floor_to_five_minutes(
+    value: datetime,
+) -> datetime:
+    value = value.astimezone(
+        timezone.utc
+    )
+
+    return value.replace(
+        minute=(
+            value.minute
+            -
+            value.minute % 5
+        ),
+        second=0,
+        microsecond=0,
+    )
+
+
+def fetch_iem_n0q_overlay(
+    bbox: tuple[
+        float,
+        float,
+        float,
+        float,
+    ],
+    width: int,
+    height: int,
+    issued_at: Optional[datetime],
+) -> Image.Image:
+    if issued_at is None:
+        issued_at = utcnow()
+
+    frame = floor_to_five_minutes(
+        issued_at
+    )
+
+    last_error: Optional[Exception] = None
+
+    # Prefer the frame at or immediately before issuance.  The additional
+    # attempts handle the uncommon case where one 5-minute mosaic is late.
+    for minutes_back in (
+        0,
+        5,
+        10,
+        15,
+    ):
+        candidate = (
+            frame
+            -
+            timedelta(
+                minutes=minutes_back
+            )
+        )
+
+        params = {
+            'SERVICE':
+                'WMS',
+            'VERSION':
+                '1.1.1',
+            'REQUEST':
+                'GetMap',
+            'LAYERS':
+                'nexrad-n0q-wmst',
+            'STYLES':
+                '',
+            'SRS':
+                'EPSG:3857',
+            'BBOX':
+                ','.join(
+                    f'{value:.3f}'
+                    for value
+                    in bbox
+                ),
+            'WIDTH':
+                str(width),
+            'HEIGHT':
+                str(height),
+            'FORMAT':
+                'image/png',
+            'TRANSPARENT':
+                'TRUE',
+            'TIME':
+                candidate.strftime(
+                    '%Y-%m-%dT%H:%M:%SZ'
+                ),
+        }
+
+        try:
+            response = http_get(
+                IEM_N0Q_WMS_T_URL,
+                params=params,
+                headers={
+                    'Accept':
+                        'image/png,*/*'
+                },
+                timeout=(
+                    8,
+                    45,
+                ),
+            )
+
+            image = Image.open(
+                io.BytesIO(
+                    response.content
+                )
+            ).convert(
+                'RGBA'
+            )
+
+            if image.size != (
+                width,
+                height,
+            ):
+                image = image.resize(
+                    (
+                        width,
+                        height,
+                    ),
+                    Image.Resampling.BILINEAR,
+                )
+
+            log.info(
+                'IEM N0Q radar frame %s selected',
+                candidate.strftime(
+                    '%Y-%m-%dT%H:%MZ'
+                ),
+            )
+
+            return image
+
+        except Exception as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
+
+    raise RetryableSourceDataError(
+        'IEM radar image was unavailable'
+    )
+
+
+def radar_base_at_issuance(
+    bbox: tuple[
+        float,
+        float,
+        float,
+        float,
+    ],
+    width: int,
+    height: int,
+    issued_at: Optional[datetime],
+) -> Image.Image:
+    base = fetch_mapbox_light_base(
+        bbox,
+        width,
+        height,
+    )
+
+    try:
+        radar = fetch_iem_n0q_overlay(
+            bbox,
+            width,
+            height,
+            issued_at,
+        )
+
+        base.alpha_composite(
+            radar
+        )
+
+    except Exception:
+        log.exception(
+            'IEM historical radar failed; '
+            'using NOAA current reflectivity fallback'
+        )
+
+        try:
+            radar = export_map_image(
+                RADAR_EXPORT_URL,
+                bbox,
+                width,
+                height,
+            )
+
+            base.alpha_composite(
+                radar
+            )
+
+        except Exception:
+            log.exception(
+                'NOAA radar fallback also failed'
+            )
+
+    return base
+
+
+def draw_unfilled_warning_polygon(
+    base: Image.Image,
+    rings: list[
+        list[
+            list[
+                float
+            ]
+        ]
+    ],
+    bbox: tuple[
+        float,
+        float,
+        float,
+        float,
+    ],
+) -> Image.Image:
+    out = base.copy().convert(
+        'RGBA'
+    )
+
+    draw = ImageDraw.Draw(
+        out,
+        'RGBA',
+    )
+
+    for ring in rings:
+        points = map_ring_to_pixels(
+            ring,
+            bbox,
+            out.width,
+            out.height,
+        )
+
+        if len(points) < 3:
+            continue
+
+        closed = (
+            points
+            +
+            [
+                points[0]
+            ]
+        )
+
+        # No polygon fill.  A white halo keeps the warning boundary distinct
+        # from intense radar echoes without obscuring the underlying storm.
+        draw.line(
+            closed,
+            fill=(
+                255,
+                255,
+                255,
+                245,
+            ),
+            width=12,
+            joint='curve',
+        )
+
+        draw.line(
+            closed,
+            fill=(
+                220,
+                20,
+                35,
+                255,
+            ),
+            width=7,
+            joint='curve',
+        )
+
+    return out
+
+
+def build_tornado_warning_map(
+    feature: dict[
+        str,
+        Any,
+    ],
+    issued_at: Optional[datetime],
+) -> str:
+    rings = warning_rings(
+        feature.get(
+            'geometry'
+        )
+    )
+
+    if not rings:
+        return ''
+
+    width = 1200
+    height = 760
+
+    bbox = map_bbox_for_rings(
+        rings,
+        width,
+        height,
+    )
+
+    base = radar_base_at_issuance(
+        bbox,
+        width,
+        height,
+        issued_at,
+    )
+
+    base = add_reference_boundaries(
+        base,
+        bbox,
+        counties=True,
+        states=True,
+    )
+
+    base = draw_unfilled_warning_polygon(
+        base,
+        rings,
+        bbox,
+    )
+
+    # Deliberately no title/header and no filled warning polygon.
+    return save_map_image(
+        base,
+        prefix='tornado_warning_radar_',
+    )
+
+
 def build_alert_polygon_image(
     feature: dict[
         str,
@@ -3979,6 +4300,29 @@ SPC_MCD_MAPSERVER = (
     'outlooks/spc_mesoscale_discussion/'
     'MapServer'
 )
+
+SPC_FIRE_MAPSERVER = (
+    'https://mapservices.weather.noaa.gov/'
+    'vector/rest/services/'
+    'fire_weather/SPC_firewx/'
+    'MapServer'
+)
+
+IEM_N0Q_WMS_T_URL = (
+    'https://mesonet.agron.iastate.edu/'
+    'cgi-bin/wms/nexrad/n0q-t.cgi'
+)
+
+SPC_FIRE_LAYER_IDS = {
+    1: (1, 2),
+    2: (4, 5),
+    3: (7, 8),
+    4: (10, 11),
+    5: (13, 14),
+    6: (16, 17),
+    7: (19, 20),
+    8: (22, 23),
+}
 
 WWA_MAPSERVER = (
     'https://mapservices.weather.noaa.gov/'
@@ -4591,6 +4935,324 @@ def spc_product_name(
     )
 
 
+def spc_fire_issue_z(
+    item: RSSItem,
+    day: int,
+    page_text: str,
+) -> str:
+    issued_at = spc_product_issuance_datetime(
+        page_text,
+        item.published,
+    )
+
+    if issued_at is None:
+        return ''
+
+    actual_minutes = (
+        issued_at.hour
+        *
+        60
+        +
+        issued_at.minute
+    )
+
+    schedules = {
+        1: (
+            60,
+            360,
+            780,
+            990,
+            1200,
+        ),
+        2: (
+            360,
+            1020,
+        ),
+        3: (
+            450,
+        ),
+        4: (
+            540,
+        ),
+        5: (
+            540,
+        ),
+        6: (
+            540,
+        ),
+        7: (
+            540,
+        ),
+        8: (
+            540,
+        ),
+    }
+
+    scheduled = schedules.get(
+        day
+    )
+
+    if scheduled:
+        def circular_distance(
+            target: int,
+        ) -> int:
+            difference = abs(
+                actual_minutes
+                -
+                target
+            )
+
+            return min(
+                difference,
+                1440
+                -
+                difference,
+            )
+
+        nearest = min(
+            scheduled,
+            key=circular_distance,
+        )
+
+        if circular_distance(
+            nearest
+        ) <= 90:
+            return (
+                f'{nearest // 60:02d}'
+                f'{nearest % 60:02d}Z'
+            )
+
+    return issued_at.strftime(
+        '%H%MZ'
+    )
+
+
+def spc_fire_risk_areas(
+    text: str,
+) -> list[
+    tuple[
+        str,
+        str,
+    ]
+]:
+    flat = squish(
+        text
+    )
+
+    results: list[
+        tuple[
+            str,
+            str,
+        ]
+    ] = []
+
+    patterns = [
+        (
+            r'\.\.\.\s*'
+            r'(EXTREME|CRITICAL|ELEVATED)\s+'
+            r'FIRE WEATHER AREA(?:S)?\s+'
+            r'(?:FOR|ACROSS)\s+'
+            r'(.+?)'
+            r'(?=\.\.\.|$)',
+            'fire',
+        ),
+        (
+            r'\.\.\.\s*'
+            r'(SCATTERED|ISOLATED)\s+'
+            r'DRY THUNDERSTORM AREA(?:S)?\s+'
+            r'(?:FOR|ACROSS)\s+'
+            r'(.+?)'
+            r'(?=\.\.\.|$)',
+            'dry',
+        ),
+    ]
+
+    for pattern, hazard_type in patterns:
+        for match in re.finditer(
+            pattern,
+            flat,
+            re.I,
+        ):
+            level = squish(
+                match.group(
+                    1
+                )
+            ).title()
+
+            location = squish(
+                match.group(
+                    2
+                )
+            ).strip(
+                ' .;:-'
+            )
+
+            location = re.sub(
+                r'(?i)^'
+                r'(?:PORTIONS?|PARTS?)\s+OF\s+(?:THE\s+)?',
+                '',
+                location,
+            )
+
+            location = re.sub(
+                r'\s+',
+                ' ',
+                location,
+            ).strip()
+
+            if not location:
+                continue
+
+            # Reject the exact sort of chopped fragment that previously
+            # produced posts such as "FAR NORTHEASTERN".
+            if re.search(
+                r'(?i)\b(?:FAR|NORTH|SOUTH|EAST|WEST|NORTHERN|SOUTHERN|'
+                r'EASTERN|WESTERN|NORTHEASTERN|NORTHWESTERN|'
+                r'SOUTHEASTERN|SOUTHWESTERN|CENTRAL)\s*$',
+                location,
+            ):
+                continue
+
+            label = (
+                level
+                if hazard_type == 'fire'
+                else
+                f'{level} Dry Thunderstorm'
+            )
+
+            pair = (
+                label,
+                smart_title_region(
+                    location
+                ),
+            )
+
+            if pair not in results:
+                results.append(
+                    pair
+                )
+
+    return results
+
+
+def spc_fire_risk_location(
+    text: str,
+) -> str:
+    areas = spc_fire_risk_areas(
+        text
+    )
+
+    if not areas:
+        return ''
+
+    rank = {
+        'Extreme': 5,
+        'Critical': 4,
+        'Scattered Dry Thunderstorm': 3,
+        'Elevated': 2,
+        'Isolated Dry Thunderstorm': 1,
+    }
+
+    highest = max(
+        rank.get(
+            level,
+            0,
+        )
+        for level, _location
+        in areas
+    )
+
+    selected = [
+        location
+        for level, location
+        in areas
+        if rank.get(
+            level,
+            0,
+        ) == highest
+        and location
+    ]
+
+    return truncate(
+        '; '.join(
+            selected
+        ),
+        320,
+    )
+
+
+def spc_fire_risk_summary(
+    text: str,
+) -> str:
+    areas = spc_fire_risk_areas(
+        text
+    )
+
+    if not areas:
+        return ''
+
+    rank = {
+        'Extreme': 5,
+        'Critical': 4,
+        'Scattered Dry Thunderstorm': 3,
+        'Elevated': 2,
+        'Isolated Dry Thunderstorm': 1,
+    }
+
+    highest = max(
+        rank.get(
+            level,
+            0,
+        )
+        for level, _location
+        in areas
+    )
+
+    top = [
+        (
+            level,
+            location,
+        )
+        for level, location
+        in areas
+        if rank.get(
+            level,
+            0,
+        ) == highest
+    ]
+
+    if not top:
+        return ''
+
+    level = top[0][0]
+    locations = [
+        location
+        for _level, location
+        in top
+        if location
+    ]
+
+    if not locations:
+        return level
+
+    if 'Dry Thunderstorm' in level:
+        return (
+            f'{level} risk in '
+            +
+            '; '.join(
+                locations
+            )
+        )
+
+    return (
+        f'{level} fire weather in '
+        +
+        '; '.join(
+            locations
+        )
+    )
+
+
 def spc_location(
     text: str,
     kind: str,
@@ -4648,26 +5310,11 @@ def spc_location(
             )
 
     if kind == 'fire':
-        match = re.search(
-            r'(?is)'
-            r'(?:CRITICAL|ELEVATED) '
-            r'FIRE WEATHER AREA'
-            r'(?:S)? '
-            r'(?:FOR|ACROSS) '
-            r'(.*?)'
-            r'(?:\.|\n)',
-            text,
+        return spc_fire_risk_location(
+            text
         )
 
-        if match:
-            return clean_spc_location(
-                match.group(
-                    1
-                )
-            )
-
     return 'United States'
-
 
 def smart_title_region(
     value: str,
@@ -5402,107 +6049,89 @@ def spc_convective_logical_key(
         item
     )
 
-    title = item.title
+    raw = item.multiline_text
 
-    date_match = re.search(
-        r'(?i)\b'
-        r'(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|'
-        r'May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|'
-        r'Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)'
-        r'\s+(\d{1,2}),\s+(\d{4})\b',
-        title,
+    valid_match = re.search(
+        r'(?i)\bVALID\s+'
+        r'(\d{6})Z\s*[-–]\s*'
+        r'(\d{6})Z\b',
+        raw,
     )
 
-    cycle_match = re.search(
-        r'\b(\d{4})\s*(?:UTC|Z)\b',
-        title,
-        re.I,
-    )
-
-    date_token = ''
-
-    if date_match:
-        try:
-            parsed_date = datetime.strptime(
-                ' '.join(
-                    (
-                        date_match.group(
-                            1
-                        )[:3],
-                        date_match.group(
-                            2
-                        ),
-                        date_match.group(
-                            3
-                        ),
-                    )
-                ),
-                '%b %d %Y',
-            )
-
-            date_token = parsed_date.strftime(
-                '%Y%m%d'
-            )
-
-        except Exception:
-            date_token = ''
-
-    if (
-        not date_token
-        and
-        item.published
-    ):
-        date_token = item.published.strftime(
-            '%Y%m%d'
-        )
-
-    cycle_token = (
-        cycle_match.group(
-            1
-        )
-        if cycle_match
-        else
-        ''
-    )
-
-    if (
-        date_token
-        and
-        cycle_token
-    ):
+    if valid_match:
+        # The valid period is the most stable identity SPC exposes across
+        # duplicate RSS representations of the same outlook issuance.
         identity = (
-            f'day{day}|'
-            f'{date_token}|'
-            f'{cycle_token}'
+            f'day{day}|valid|'
+            f'{valid_match.group(1)}|'
+            f'{valid_match.group(2)}'
         )
 
-    else:
+        return sha256_text(
+            identity
+        )
+
+    wmo_match = re.search(
+        r'(?im)^\s*'
+        r'[A-Z]{4}\d{2}\s+KWNS\s+'
+        r'(\d{6})\b',
+        raw,
+    )
+
+    if not wmo_match:
         wmo_match = re.search(
             r'(?im)^\s*SPC\s+AC\s+'
             r'(\d{6})\b',
-            item.multiline_text,
+            raw,
         )
 
-        identity = (
-            f'day{day}|'
-            +
-            (
-                wmo_match.group(
-                    1
-                )
-                if wmo_match
-                else
-                item.guid
-                or
-                item.link
-                or
-                item.key
-            )
+    if wmo_match:
+        return sha256_text(
+            f'day{day}|wmo|{wmo_match.group(1)}'
+        )
+
+    # Final fallback deliberately avoids GUID/link, since SPC can publish
+    # multiple RSS objects for one issuance.  Minute-rounded publication
+    # time plus day is much less likely to generate duplicate X posts.
+    if item.published:
+        published = item.published.astimezone(
+            timezone.utc
+        ).replace(
+            second=0,
+            microsecond=0,
+        )
+
+        return sha256_text(
+            f'day{day}|published|{published:%Y%m%d%H%M}'
         )
 
     return sha256_text(
-        identity
+        f'day{day}|{squish(item.title)}'
     )
+
+def spc_product_issuance_datetime(
+    text: str,
+    reference: Optional[datetime],
+) -> Optional[datetime]:
+    match = re.search(
+        r'(?im)^\s*'
+        r'[A-Z]{4}\d{2}\s+KWNS\s+'
+        r'(\d{6})\b',
+        text,
+    )
+
+    if match:
+        resolved = spc_resolve_ddhhmm(
+            match.group(
+                1
+            ),
+            reference,
+        )
+
+        if resolved is not None:
+            return resolved
+
+    return reference
 
 
 def find_local_issue_clock(
@@ -7139,64 +7768,69 @@ def build_mapbox_spc_outlook_map(
     width = 1200
     height = 760
 
-    all_points: list[
-        tuple[
-            float,
-            float,
-        ]
-    ] = []
-
-    for feature in primary_features:
-        geometry = (
-            feature.get(
-                'geometry'
-            )
-            or
-            {}
-        )
-
-        if geometry:
-            all_points.extend(
-                mercator_points_from_arcgis_geometry(
-                    geometry,
-                    default_wkid=3857,
-                )
-            )
-
-    if all_points:
-        if day <= 2:
-            padding_factor = 1.42
-            min_width_m = 3000000.0
-            min_height_m = 1800000.0
-
-        elif day == 3:
-            padding_factor = 1.35
-            min_width_m = 3600000.0
-            min_height_m = 2100000.0
-
-        else:
-            padding_factor = 1.30
-            min_width_m = 4200000.0
-            min_height_m = 2400000.0
-
-        bbox = mercator_bbox_from_points(
-            all_points,
-            width,
-            height,
-            padding_factor=
-                padding_factor,
-            min_width_m=
-                min_width_m,
-            min_height_m=
-                min_height_m,
-        )
-
-    else:
+    if day >= 4:
+        # Extended outlooks are national products even when SPC has no
+        # 15/30-percent contour.  Never zoom to placeholder/empty geometry.
         bbox = mercator_bbox_from_lonlat(
             *default_spc_map_extent_for_day(
                 day
             )
         )
+
+    else:
+        all_points: list[
+            tuple[
+                float,
+                float,
+            ]
+        ] = []
+
+        for feature in primary_features:
+            geometry = (
+                feature.get(
+                    'geometry'
+                )
+                or
+                {}
+            )
+
+            if geometry:
+                all_points.extend(
+                    mercator_points_from_arcgis_geometry(
+                        geometry,
+                        default_wkid=3857,
+                    )
+                )
+
+        if all_points:
+            if day <= 2:
+                padding_factor = 1.42
+                min_width_m = 3000000.0
+                min_height_m = 1800000.0
+
+            else:
+                padding_factor = 1.35
+                min_width_m = 3600000.0
+                min_height_m = 2100000.0
+
+            bbox = mercator_bbox_from_points(
+                all_points,
+                width,
+                height,
+                padding_factor=
+                    padding_factor,
+                min_width_m=
+                    min_width_m,
+                min_height_m=
+                    min_height_m,
+            )
+
+        else:
+            bbox = mercator_bbox_from_lonlat(
+                *default_spc_map_extent_for_day(
+                    day
+                )
+            )
 
     base = fetch_mapbox_light_base(
         bbox,
@@ -7230,6 +7864,96 @@ def build_mapbox_spc_outlook_map(
         base,
         prefix=
             f'spc_day{day}_',
+    )
+
+def build_mapbox_spc_fire_map(
+    day: int,
+    expected_valid: Optional[datetime],
+) -> str:
+    layers = SPC_FIRE_LAYER_IDS.get(
+        day
+    )
+
+    if not layers:
+        raise RetryableSourceDataError(
+            f'No SPC Fire Weather GIS mapping exists for Day {day}'
+        )
+
+    width = 1200
+    height = 760
+
+    # Fire Weather Outlooks are nationwide outlook products.  Use the same
+    # full-CONUS presentation every time instead of zooming to one polygon.
+    bbox = mercator_bbox_from_lonlat(
+        -128,
+        22,
+        -65,
+        52,
+    )
+
+    # Verify that any currently present GIS polygons correspond to the
+    # product's valid period.  Empty layers are allowed and simply yield a
+    # clean national map with no risk shading.
+    for layer in layers:
+        features = arcgis_query_features(
+            SPC_FIRE_MAPSERVER,
+            layer,
+            out_fields=(
+                'objectid,dn,valid,expire,'
+                'idp_source,idp_filedate,'
+                'idp_ingestdate'
+            ),
+            return_geometry=False,
+        )
+
+        if features:
+            spc_filter_features_for_valid(
+                features,
+                expected_valid,
+                day=day,
+                layer_name=f'fire weather layer {layer}',
+            )
+
+    base = fetch_mapbox_light_base(
+        bbox,
+        width,
+        height,
+    )
+
+    product = export_map_image(
+        f'{SPC_FIRE_MAPSERVER}/export',
+        bbox,
+        width,
+        height,
+        layers=(
+            'show:'
+            +
+            ','.join(
+                str(layer)
+                for layer
+                in layers
+            )
+        ),
+    )
+
+    base.alpha_composite(
+        product
+    )
+
+    # Nationwide SPC/WPC outlook maps intentionally use slightly thinner
+    # state lines than local warning/watch/MD products.
+    base = add_reference_boundaries(
+        base,
+        bbox,
+        counties=False,
+        states=True,
+        state_halo_width=5,
+        state_line_width=3,
+    )
+
+    return save_map_image(
+        base,
+        prefix=f'spc_fire_day{day}_',
     )
 
 
@@ -7619,20 +8343,51 @@ def find_matching_watch_feature(
 
 def build_mcd_image(
     feature: SPCGeometryMatch,
+    issued_at: Optional[datetime] = None,
 ) -> str:
-    return (
-        build_mapbox_product_outline_map(
-            feature.geometry,
-            default_wkid=4326,
-            padding_factor=2.35,
-            min_width_m=280000.0,
-            min_height_m=190000.0,
-            prefix='spc_md_',
-            show_counties=True,
-            line_width=7,
-        )
+    width = 1200
+    height = 760
+
+    points = mercator_points_from_arcgis_geometry(
+        feature.geometry,
+        default_wkid=4326,
     )
 
+    bbox = mercator_bbox_from_points(
+        points,
+        width,
+        height,
+        padding_factor=2.35,
+        min_width_m=280000.0,
+        min_height_m=190000.0,
+    )
+
+    base = radar_base_at_issuance(
+        bbox,
+        width,
+        height,
+        issued_at,
+    )
+
+    base = add_reference_boundaries(
+        base,
+        bbox,
+        counties=True,
+        states=True,
+    )
+
+    base = draw_red_outline_geometry(
+        base,
+        feature.geometry,
+        bbox,
+        default_wkid=4326,
+        line_width=7,
+    )
+
+    return save_map_image(
+        base,
+        prefix='spc_md_radar_',
+    )
 
 def build_watch_image(
     feature: SPCGeometryMatch,
@@ -8695,6 +9450,61 @@ def render_spc(
             image_path,
         )
 
+    if kind == 'fire':
+        day_match = re.search(
+            r'Day\s*([1-8])',
+            f'{item.title} {page_text}',
+            re.I,
+        )
+
+        if not day_match:
+            raise RetryableSourceDataError(
+                'SPC Fire Weather Outlook is missing a day number'
+            )
+
+        day = int(
+            day_match.group(
+                1
+            )
+        )
+
+        expected_valid = spc_outlook_valid_start(
+            page_text,
+            item.published,
+        )
+
+        image_path = build_mapbox_spc_fire_map(
+            day,
+            expected_valid,
+        )
+
+        issue_z = spc_fire_issue_z(
+            item,
+            day,
+            page_text,
+        )
+
+        summary = spc_fire_risk_summary(
+            page_text
+        )
+
+        return RenderedPost(
+            fit_post(
+                [
+                    product_name,
+                    (
+                        f'Issued at {issue_z}'
+                        if issue_z
+                        else
+                        time_line
+                    ),
+                    summary,
+                ],
+                item.link,
+            ),
+            image_path,
+        )
+
     if kind == 'md':
         concerning = spc_field(
             page_text,
@@ -8739,9 +9549,15 @@ def render_spc(
                 'was not ready yet'
             )
 
+        md_issued_at = spc_product_issuance_datetime(
+            page_text,
+            item.published,
+        )
+
         image_path = (
             build_mcd_image(
-                match
+                match,
+                md_issued_at,
             )
         )
 
@@ -8937,7 +9753,7 @@ def poll_spc_convective_source(
     ]
 
     state_source = (
-        f'{source}:logical_cycle_v87'
+        f'{source}:logical_cycle_v88'
     )
 
     by_key: dict[
@@ -14632,6 +15448,479 @@ def format_cap_time(
     )
 
 
+US_STATE_NAMES = {
+    'AL': 'ALABAMA',
+    'AK': 'ALASKA',
+    'AZ': 'ARIZONA',
+    'AR': 'ARKANSAS',
+    'CA': 'CALIFORNIA',
+    'CO': 'COLORADO',
+    'CT': 'CONNECTICUT',
+    'DE': 'DELAWARE',
+    'FL': 'FLORIDA',
+    'GA': 'GEORGIA',
+    'HI': 'HAWAII',
+    'ID': 'IDAHO',
+    'IL': 'ILLINOIS',
+    'IN': 'INDIANA',
+    'IA': 'IOWA',
+    'KS': 'KANSAS',
+    'KY': 'KENTUCKY',
+    'LA': 'LOUISIANA',
+    'ME': 'MAINE',
+    'MD': 'MARYLAND',
+    'MA': 'MASSACHUSETTS',
+    'MI': 'MICHIGAN',
+    'MN': 'MINNESOTA',
+    'MS': 'MISSISSIPPI',
+    'MO': 'MISSOURI',
+    'MT': 'MONTANA',
+    'NE': 'NEBRASKA',
+    'NV': 'NEVADA',
+    'NH': 'NEW HAMPSHIRE',
+    'NJ': 'NEW JERSEY',
+    'NM': 'NEW MEXICO',
+    'NY': 'NEW YORK',
+    'NC': 'NORTH CAROLINA',
+    'ND': 'NORTH DAKOTA',
+    'OH': 'OHIO',
+    'OK': 'OKLAHOMA',
+    'OR': 'OREGON',
+    'PA': 'PENNSYLVANIA',
+    'RI': 'RHODE ISLAND',
+    'SC': 'SOUTH CAROLINA',
+    'SD': 'SOUTH DAKOTA',
+    'TN': 'TENNESSEE',
+    'TX': 'TEXAS',
+    'UT': 'UTAH',
+    'VT': 'VERMONT',
+    'VA': 'VIRGINIA',
+    'WA': 'WASHINGTON',
+    'WV': 'WEST VIRGINIA',
+    'WI': 'WISCONSIN',
+    'WY': 'WYOMING',
+    'DC': 'DISTRICT OF COLUMBIA',
+}
+
+
+def nws_tornado_office(
+    props: dict[str, Any],
+) -> str:
+    combined = '\n'.join(
+        str(
+            props.get(
+                key
+            )
+            or
+            ''
+        )
+        for key
+        in (
+            'description',
+            'instruction',
+            'headline',
+        )
+    )
+
+    match = re.search(
+        r'(?is)'
+        r'The National Weather Service in\s+'
+        r'(.+?)\s+'
+        r'has issued',
+        combined,
+    )
+
+    if match:
+        return squish(
+            match.group(
+                1
+            )
+        ).strip(
+            ' .,:;'
+        )
+
+    sender = squish(
+        str(
+            props.get(
+                'senderName'
+            )
+            or
+            ''
+        )
+    )
+
+    sender = re.sub(
+        r'(?i)^NWS\s+',
+        '',
+        sender,
+    )
+
+    sender = re.sub(
+        r'(?i)^National Weather Service\s+',
+        '',
+        sender,
+    )
+
+    return sender.strip(
+        ' .,:;'
+    )
+
+
+def nws_area_desc_county_phrase(
+    area_desc: str,
+) -> str:
+    groups: dict[
+        str,
+        list[str],
+    ] = {}
+
+    for raw_part in re.split(
+        r'\s*;\s*',
+        area_desc,
+    ):
+        part = squish(
+            raw_part
+        )
+
+        if not part:
+            continue
+
+        match = re.match(
+            r'(.+?),\s*([A-Z]{2})$',
+            part,
+            re.I,
+        )
+
+        if not match:
+            continue
+
+        county = match.group(
+            1
+        ).strip()
+
+        state = match.group(
+            2
+        ).upper()
+
+        groups.setdefault(
+            state,
+            [],
+        ).append(
+            county
+        )
+
+    phrases: list[str] = []
+
+    for state, counties in groups.items():
+        unique: list[str] = []
+
+        for county in counties:
+            if county not in unique:
+                unique.append(
+                    county
+                )
+
+        if not unique:
+            continue
+
+        already_named = all(
+            re.search(
+                r'(?i)\b'
+                r'(?:COUNTY|PARISH|BOROUGH|MUNICIPALITY|CITY)\b',
+                county,
+            )
+            for county
+            in unique
+        )
+
+        if already_named:
+            county_phrase = (
+                ', '.join(
+                    unique[:-1]
+                )
+                +
+                (
+                    ' AND '
+                    if len(unique) > 1
+                    else
+                    ''
+                )
+                +
+                unique[-1]
+            )
+        elif len(unique) == 1:
+            county_phrase = (
+                f'{unique[0]} COUNTY'
+            )
+        elif len(unique) == 2:
+            county_phrase = (
+                f'{unique[0]} AND {unique[1]} COUNTIES'
+            )
+        else:
+            county_phrase = (
+                ', '.join(
+                    unique[:-1]
+                )
+                +
+                f', AND {unique[-1]} COUNTIES'
+            )
+
+        phrases.append(
+            f'{county_phrase} IN '
+            f'{US_STATE_NAMES.get(state, state)}'
+        )
+
+    return ' AND '.join(
+        phrases
+    )
+
+
+def nws_tornado_area_phrase(
+    props: dict[str, Any],
+) -> str:
+    description = str(
+        props.get(
+            'description'
+        )
+        or
+        ''
+    )
+
+    match = re.search(
+        r'(?is)'
+        r'Tornado Warning for(?:\.\.\.)?\s*'
+        r'(.+?)'
+        r'(?=\*?\s*Until\b)',
+        description,
+    )
+
+    if match:
+        area = squish(
+            match.group(
+                1
+            )
+        )
+
+        area = re.sub(
+            r'\s*\.\.\.\s*',
+            ' ',
+            area,
+        )
+
+        area = re.sub(
+            r'^\*\s*',
+            '',
+            area,
+        )
+
+        area = area.strip(
+            ' .;:-'
+        )
+
+        if area:
+            return area
+
+    fallback = nws_area_desc_county_phrase(
+        squish(
+            str(
+                props.get(
+                    'areaDesc'
+                )
+                or
+                ''
+            )
+        )
+    )
+
+    if fallback:
+        return fallback
+
+    return squish(
+        str(
+            props.get(
+                'areaDesc'
+            )
+            or
+            ''
+        )
+    )
+
+
+def nws_tornado_until_phrase(
+    props: dict[str, Any],
+) -> str:
+    description = str(
+        props.get(
+            'description'
+        )
+        or
+        ''
+    )
+
+    match = re.search(
+        r'(?is)'
+        r'\*?\s*Until\s+'
+        r'([0-9]{1,4}\s+[AP]M\s+[A-Z]{2,5})\b',
+        description,
+    )
+
+    if match:
+        return squish(
+            match.group(
+                1
+            )
+        )
+
+    expires = parse_any_datetime(
+        str(
+            props.get(
+                'expires'
+            )
+            or
+            ''
+        )
+    )
+
+    if expires:
+        return expires.strftime(
+            '%H%MZ'
+        )
+
+    return ''
+
+
+def nws_tornado_emergency(
+    props: dict[str, Any],
+    parameters: dict[str, Any],
+) -> bool:
+    combined = ' '.join(
+        str(
+            props.get(
+                key
+            )
+            or
+            ''
+        )
+        for key
+        in (
+            'headline',
+            'description',
+            'instruction',
+        )
+    ).upper()
+
+    damage = first_parameter(
+        parameters,
+        'tornadoDamageThreat',
+    ).lower()
+
+    return (
+        'TORNADO EMERGENCY'
+        in combined
+        or
+        damage == 'catastrophic'
+    )
+
+
+def nws_tornado_is_pds(
+    props: dict[str, Any],
+) -> bool:
+    combined = ' '.join(
+        str(
+            props.get(
+                key
+            )
+            or
+            ''
+        )
+        for key
+        in (
+            'headline',
+            'description',
+            'instruction',
+        )
+    ).upper()
+
+    return (
+        'PARTICULARLY DANGEROUS SITUATION'
+        in combined
+    )
+
+
+def render_tornado_warning_text(
+    props: dict[str, Any],
+    parameters: dict[str, Any],
+) -> str:
+    office = nws_tornado_office(
+        props
+    )
+
+    area = nws_tornado_area_phrase(
+        props
+    )
+
+    until = nws_tornado_until_phrase(
+        props
+    )
+
+    emergency = nws_tornado_emergency(
+        props,
+        parameters,
+    )
+
+    warning_type = (
+        'TORNADO EMERGENCY'
+        if emergency
+        else
+        'TORNADO WARNING'
+    )
+
+    office_text = (
+        office.upper()
+        if office
+        else
+        'THE ISSUING FORECAST OFFICE'
+    )
+
+    area_text = (
+        area.upper()
+        if area
+        else
+        'THE WARNED AREA'
+    )
+
+    sentence = (
+        'THE NATIONAL WEATHER SERVICE IN '
+        f'{office_text} HAS ISSUED A '
+        f'{warning_type} FOR '
+        f'{area_text}'
+    )
+
+    if until:
+        sentence += (
+            f' UNTIL {until.upper()}'
+        )
+
+    sentence = sentence.rstrip(
+        ' .'
+    ) + '.'
+
+    parts = [
+        sentence
+    ]
+
+    if nws_tornado_is_pds(
+        props
+    ):
+        parts.append(
+            'THIS IS A PARTICULARLY DANGEROUS SITUATION.'
+        )
+
+    return '\n'.join(
+        parts
+    )
+
+
 def render_nws_alert(
     feature: dict[
         str,
@@ -14655,13 +15944,44 @@ def render_nws_alert(
         {}
     )
 
+    if kind == 'tornado':
+        issued_at = parse_any_datetime(
+            str(
+                props.get(
+                    'sent'
+                )
+                or
+                ''
+            )
+        )
+
+        image_path = ''
+
+        try:
+            image_path = build_tornado_warning_map(
+                feature,
+                issued_at,
+            )
+
+        except Exception:
+            log.exception(
+                'Could not build tornado-warning '
+                'IEM radar map'
+            )
+
+        return RenderedPost(
+            fit_post(
+                [
+                    render_tornado_warning_text(
+                        props,
+                        parameters,
+                    )
+                ]
+            ),
+            image_path,
+        )
+
     product = (
-        'Tornado Warning'
-        if
-        kind
-        ==
-        'tornado'
-        else
         squish(
             props.get(
                 'event'
@@ -14720,72 +16040,25 @@ def render_nws_alert(
         if part
     )
 
-    hazards = (
-        [
-            'Tornado'
-        ]
-        if
-        kind
-        ==
-        'tornado'
-        else
-        extract_hazards(
-            f'{product} '
-            f'{props.get("headline") or ""} '
-            f'{props.get("description") or ""}',
-            product,
-        )
+    hazards = extract_hazards(
+        f'{product} '
+        f'{props.get("headline") or ""} '
+        f'{props.get("description") or ""}',
+        product,
     )
-
-    if kind == 'tornado':
-        damage = first_parameter(
-            parameters,
-            'tornadoDamageThreat',
-        )
-
-        detection = first_parameter(
-            parameters,
-            'tornadoDetection',
-        )
-
-        if (
-            damage
-            and
-            damage.lower()
-            not in {
-                'base',
-                'none',
-            }
-        ):
-            hazards.append(
-                f'{damage.title()} '
-                'damage threat'
-            )
-
-        if detection:
-            hazards.append(
-                detection.title()
-            )
 
     image_path = ''
 
     try:
-        image_path = (
-            build_alert_polygon_image(
-                feature,
-                product,
-                radar=(
-                    kind
-                    ==
-                    'tornado'
-                ),
-            )
+        image_path = build_alert_polygon_image(
+            feature,
+            product,
+            radar=False,
         )
 
     except Exception:
         log.exception(
-            'Could not build %s '
-            'map image',
+            'Could not build %s map image',
             product,
         )
 
@@ -14809,7 +16082,6 @@ def render_nws_alert(
         ),
         image_path,
     )
-
 
 def poll_nws_alerts(
     db: StateDB,

@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-27-fast-watch-nhc-wallet-v8.10'
+BUILD_ID = '2026-08-27-watch-radar-v8.11'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -9246,11 +9246,59 @@ def build_mcd_image(
 
 def build_watch_image(
     feature: SPCGeometryMatch,
+    issued_at: Optional[datetime] = None,
 ) -> str:
-    return (
-        build_mapbox_watch_outline_map(
-            feature.geometry
+    width = 1200
+    height = 760
+
+    points = mercator_points_from_arcgis_geometry(
+        feature.geometry,
+        default_wkid=4326,
+    )
+
+    if not points:
+        raise RetryableSourceDataError(
+            'Watch geometry contained no drawable coordinates'
         )
+
+    bbox = mercator_bbox_from_points(
+        points,
+        width,
+        height,
+        padding_factor=1.48,
+        min_width_m=900000.0,
+        min_height_m=560000.0,
+    )
+
+    # Watches now use the same issuance-time IEM N0Q radar base as MCDs
+    # and tornado warnings.  NOAA current reflectivity remains the fallback
+    # inside radar_base_at_issuance if the archived IEM frame is unavailable.
+    base = radar_base_at_issuance(
+        bbox,
+        width,
+        height,
+        issued_at,
+    )
+
+    base = add_reference_boundaries(
+        base,
+        bbox,
+        counties=True,
+        states=True,
+    )
+
+    # Keep the watch box unfilled so radar remains fully visible underneath.
+    base = draw_union_red_outline_geometry(
+        base,
+        feature.geometry,
+        bbox,
+        default_wkid=4326,
+        line_width=7,
+    )
+
+    return save_map_image(
+        base,
+        prefix='spc_watch_radar_',
     )
 
 
@@ -10589,9 +10637,23 @@ def render_spc(
                 f'Issued {issued}'
             )
 
+        watch_issued_at = (
+            arcgis_datetime(
+                match.attributes.get(
+                    'issuance'
+                )
+            )
+            or
+            spc_product_issuance_datetime(
+                page_text,
+                item.published,
+            )
+        )
+
         image_path = (
             build_watch_image(
-                match
+                match,
+                watch_issued_at,
             )
         )
 

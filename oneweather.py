@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-27-nhc-mapbox-v8.4'
+BUILD_ID = '2026-08-27-nhc-operational-maps-v8.5'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -124,6 +124,22 @@ NHC_BASIN_LABELS = {
     'epac': 'Eastern Pacific',
     'cpac': 'Central Pacific',
 }
+
+NHC_TROPICAL_MAPSERVER = (
+    'https://mapservices.weather.noaa.gov/'
+    'tropical/rest/services/tropical/'
+    'NHC_tropical_weather_summary/'
+    'MapServer'
+)
+
+NHC_TWO_CURRENT_LAYER = 2
+NHC_TWO_REGION_LAYER = 3
+NHC_FORECAST_POINTS_LAYER = 5
+NHC_FORECAST_TRACK_LAYER = 6
+NHC_FORECAST_CONE_LAYER = 7
+NHC_WATCH_WARNING_LAYER = 8
+NHC_TWO_MOTION_LAYER = 33
+NHC_ATCF_BTK_INDEX_URL = 'https://ftp.nhc.noaa.gov/atcf/btk/'
 
 RADAR_EXPORT_URL = (
     'https://mapservices.weather.noaa.gov/'
@@ -8483,58 +8499,301 @@ def nhc_lonlat_from_text(
     )
 
 
-def nhc_forecast_points(
-    text: str,
-) -> list[
-    tuple[
-        str,
-        float,
-        float,
-        Optional[int],
-    ]
+def nhc_storm_identity(
+    item: RSSItem,
+) -> tuple[
+    str,
+    str,
 ]:
-    points: list[
-        tuple[
-            str,
-            float,
-            float,
-            Optional[int],
-        ]
-    ] = []
-
-    pattern = re.compile(
-        r'(?im)^'
-        r'\s*'
-        r'(INIT|\d{1,3}H)'
-        r'\s+'
-        r'\d{1,2}/\d{4}Z'
-        r'\s+'
-        r'([0-9]+(?:\.[0-9]+)?[NS])'
-        r'\s+'
-        r'([0-9]+(?:\.[0-9]+)?[EW])'
-        r'\s+'
-        r'(\d+)'
-        r'\s+KT'
-        r'(?:'
-        r'\s+'
-        r'(\d+)'
-        r'\s+MPH'
-        r')?'
+    storm_type_pattern = (
+        r'(?:Major\s+Hurricane|'
+        r'Hurricane|'
+        r'Tropical\s+Storm|'
+        r'Tropical\s+Depression|'
+        r'Subtropical\s+Storm|'
+        r'Subtropical\s+Depression|'
+        r'Potential\s+Tropical\s+Cyclone|'
+        r'Post-Tropical\s+Cyclone)'
     )
 
-    for match in pattern.finditer(
-        text
-    ):
-        lat = nhc_coordinate_value(
+    product_tail = (
+        r'(?:'
+        r'Advisory|'
+        r'Intermediate\s+Advisory|'
+        r'Special\s+Advisory|'
+        r'Forecast/Advisory|'
+        r'Forecast\s+Advisory|'
+        r'Forecast\s+Discussion|'
+        r'Tropical\s+Cyclone\s+Update|'
+        r'Public\s+Advisory|'
+        r'Update'
+        r')'
+    )
+
+    candidates = [
+        item.title,
+        *item.multiline_text.splitlines()[:80],
+    ]
+
+    for candidate in candidates:
+        candidate = squish(
+            candidate
+        )
+
+        if not candidate:
+            continue
+
+        match = re.search(
+            rf'(?i)^\s*'
+            rf'({storm_type_pattern})'
+            rf'\s+'
+            rf'([A-Z0-9][A-Z0-9-]{{1,24}})'
+            rf'(?:\s+{product_tail}\b|\s+NUMBER\b|$)',
+            candidate,
+        )
+
+        if not match:
+            continue
+
+        storm_type = squish(
+            match.group(
+                1
+            )
+        ).title()
+
+        storm_name = squish(
             match.group(
                 2
             )
+        ).title()
+
+        if storm_name.upper() in {
+            'CENTER',
+            'CENTRE',
+            'WARNING',
+            'WATCH',
+        }:
+            continue
+
+        return (
+            storm_type,
+            storm_name,
         )
 
-        lon = nhc_coordinate_value(
-            match.group(
-                3
+    return (
+        '',
+        '',
+    )
+
+
+def nhc_storm_name(
+    item: RSSItem,
+) -> str:
+    storm_type, storm_name = (
+        nhc_storm_identity(
+            item
+        )
+    )
+
+    return squish(
+        ' '.join(
+            part
+            for part
+            in (
+                storm_type,
+                storm_name,
             )
+            if part
+        )
+    )
+
+
+def nhc_atcf_id(
+    text: str,
+) -> str:
+    match = re.search(
+        r'\b'
+        r'((?:AL|EP|CP)\d{6})'
+        r'\b',
+        text,
+        re.I,
+    )
+
+    return (
+        match.group(
+            1
+        ).upper()
+        if match
+        else
+        ''
+    )
+
+
+def nhc_invest_ids(
+    text: str,
+) -> list[str]:
+    found: list[str] = []
+
+    def add(
+        value: str,
+    ) -> None:
+        value = value.upper()
+
+        if (
+            re.fullmatch(
+                r'9\d[LEC]',
+                value,
+            )
+            and
+            value not in found
+        ):
+            found.append(
+                value
+            )
+
+    for match in re.finditer(
+        r'(?i)\bINVEST\s+(9\d[LEC])\b',
+        text,
+    ):
+        add(
+            match.group(
+                1
+            )
+        )
+
+    for match in re.finditer(
+        r'(?i)\b(9\d[LEC])\b',
+        text,
+    ):
+        add(
+            match.group(
+                1
+            )
+        )
+
+    basin_suffix = {
+        'AL': 'L',
+        'EP': 'E',
+        'CP': 'C',
+    }
+
+    for match in re.finditer(
+        r'(?i)\b(AL|EP|CP)(9\d)(?:\d{4})?\b',
+        text,
+    ):
+        prefix = match.group(
+            1
+        ).upper()
+
+        number = match.group(
+            2
+        )
+
+        add(
+            number
+            +
+            basin_suffix[
+                prefix
+            ]
+        )
+
+    return found
+
+
+@dataclass(frozen=True)
+class NHCInvestFix:
+    invest_id: str
+    lon: float
+    lat: float
+    valid: datetime
+
+
+def nhc_atcf_coordinate(
+    value: str,
+) -> Optional[float]:
+    match = re.fullmatch(
+        r'\s*'
+        r'(\d{1,4})'
+        r'([NSEW])'
+        r'\s*',
+        value,
+        re.I,
+    )
+
+    if not match:
+        return None
+
+    number = int(
+        match.group(
+            1
+        )
+    )
+
+    coordinate = (
+        number
+        /
+        10.0
+    )
+
+    hemisphere = (
+        match.group(
+            2
+        )
+        .upper()
+    )
+
+    if hemisphere in {
+        'S',
+        'W',
+    }:
+        coordinate *= -1.0
+
+    return coordinate
+
+
+def nhc_parse_atcf_invest_fix(
+    text: str,
+    invest_id: str,
+) -> Optional[NHCInvestFix]:
+    latest: Optional[NHCInvestFix] = None
+
+    for raw_line in text.splitlines():
+        fields = [
+            field.strip()
+            for field
+            in raw_line.split(',')
+        ]
+
+        if len(fields) < 9:
+            continue
+
+        if fields[4].upper() != 'BEST':
+            continue
+
+        stamp = fields[2]
+
+        if not re.fullmatch(
+            r'\d{10}',
+            stamp,
+        ):
+            continue
+
+        try:
+            valid = datetime.strptime(
+                stamp,
+                '%Y%m%d%H',
+            ).replace(
+                tzinfo=timezone.utc
+            )
+        except Exception:
+            continue
+
+        lat = nhc_atcf_coordinate(
+            fields[6]
+        )
+
+        lon = nhc_atcf_coordinate(
+            fields[7]
         )
 
         if (
@@ -8544,212 +8803,411 @@ def nhc_forecast_points(
         ):
             continue
 
-        mph = (
-            int(
-                match.group(
-                    5
-                )
-            )
-            if
-            match.group(
-                5
-            )
-            else
-            int(
-                round(
-                    int(
-                        match.group(
-                            4
-                        )
-                    )
-                    *
-                    1.15078
-                )
-            )
+        candidate = NHCInvestFix(
+            invest_id=
+                invest_id,
+            lon=lon,
+            lat=lat,
+            valid=valid,
         )
 
-        points.append(
-            (
-                match.group(
-                    1
-                ).upper(),
-                lon,
-                lat,
-                mph,
-            )
-        )
+        if (
+            latest is None
+            or
+            candidate.valid
+            >
+            latest.valid
+        ):
+            latest = candidate
 
-    return points
+    return latest
 
 
-def nhc_unwrap_track_longitudes(
-    points: list[
-        tuple[
-            str,
-            float,
-            float,
-            Optional[int],
-        ]
-    ],
-) -> list[
-    tuple[
-        str,
-        float,
-        float,
-        Optional[int],
-    ]
-]:
-    if not points:
+def nhc_active_atcf_invests(
+    basin: str,
+) -> list[NHCInvestFix]:
+    prefix = {
+        'atlantic': 'al',
+        'epac': 'ep',
+        'cpac': 'cp',
+    }.get(
+        basin,
+        '',
+    )
+
+    suffix = {
+        'atlantic': 'L',
+        'epac': 'E',
+        'cpac': 'C',
+    }.get(
+        basin,
+        '',
+    )
+
+    if not prefix:
         return []
 
-    reference = points[0][1]
-    out: list[
-        tuple[
-            str,
-            float,
-            float,
-            Optional[int],
-        ]
-    ] = []
+    year = utcnow().year
 
-    for (
-        label,
-        lon,
-        lat,
-        mph,
-    ) in points:
-        adjusted = lon
-
-        while (
-            adjusted
-            -
-            reference
-            >
-            180.0
-        ):
-            adjusted -= 360.0
-
-        while (
-            adjusted
-            -
-            reference
-            <
-            -180.0
-        ):
-            adjusted += 360.0
-
-        out.append(
-            (
-                label,
-                adjusted,
-                lat,
-                mph,
-            )
+    try:
+        response = http_get(
+            NHC_ATCF_BTK_INDEX_URL,
+            headers={
+                'Accept':
+                    'text/html,text/plain,*/*'
+            },
+            timeout=(
+                8,
+                30,
+            ),
         )
-
-    average_lon = (
-        sum(
-            point[1]
-            for point
-            in out
+    except Exception:
+        log.exception(
+            'Could not read NHC ATCF best-track index'
         )
-        /
-        len(
-            out
-        )
-    )
+        return []
 
-    shift = 0.0
-
-    while average_lon + shift > 180.0:
-        shift -= 360.0
-
-    while average_lon + shift < -180.0:
-        shift += 360.0
-
-    if shift:
-        out = [
-            (
-                label,
-                lon + shift,
-                lat,
-                mph,
-            )
-            for (
-                label,
-                lon,
-                lat,
-                mph,
-            )
-            in out
-        ]
-
-    return out
-
-
-def nhc_storm_name(
-    item: RSSItem,
-) -> str:
-    combined = (
-        f'{item.title} '
-        +
-        item.multiline_text[:1200]
-    )
-
-    match = re.search(
-        r'(?i)\b'
-        r'('
-        r'(?:Major\s+)?Hurricane'
-        r'|'
-        r'Tropical Storm'
-        r'|'
-        r'Tropical Depression'
-        r'|'
-        r'Subtropical Storm'
-        r'|'
-        r'Subtropical Depression'
-        r'|'
-        r'Potential Tropical Cyclone'
-        r')'
-        r'\s+'
-        r'([A-Z][A-Z0-9-]{1,20})'
-        r'\b',
-        combined,
+    file_pattern = re.compile(
+        rf'\bb{prefix}(9\d){year}\.dat\b',
         re.I,
     )
 
-    if not match:
-        return ''
+    file_names: list[str] = []
 
-    storm_type = (
-        match.group(
-            1
+    for match in file_pattern.finditer(
+        response.text
+    ):
+        file_name = match.group(
+            0
+        ).lower()
+
+        if file_name not in file_names:
+            file_names.append(
+                file_name
+            )
+
+    fixes: list[NHCInvestFix] = []
+
+    for file_name in file_names:
+        number_match = re.search(
+            rf'b{prefix}(9\d){year}\.dat',
+            file_name,
+            re.I,
         )
-        .title()
+
+        if not number_match:
+            continue
+
+        invest_id = (
+            number_match.group(
+                1
+            )
+            +
+            suffix
+        )
+
+        try:
+            data = http_get(
+                urljoin(
+                    NHC_ATCF_BTK_INDEX_URL,
+                    file_name,
+                ),
+                headers={
+                    'Accept':
+                        'text/plain,*/*'
+                },
+                timeout=(
+                    8,
+                    30,
+                ),
+            ).text
+        except Exception:
+            continue
+
+        fix = nhc_parse_atcf_invest_fix(
+            data,
+            invest_id,
+        )
+
+        if not fix:
+            continue
+
+        if (
+            utcnow()
+            -
+            fix.valid
+            >
+            timedelta(
+                hours=42
+            )
+        ):
+            continue
+
+        fixes.append(
+            fix
+        )
+
+    return fixes
+
+
+def nhc_gtwo_point_lonlat(
+    feature: dict[str, Any],
+) -> tuple[
+    Optional[float],
+    Optional[float],
+]:
+    geometry = (
+        feature.get(
+            'geometry'
+        )
+        or
+        {}
     )
 
-    name = (
-        match.group(
-            2
+    try:
+        x = float(
+            geometry[
+                'x'
+            ]
         )
-        .title()
+        y = float(
+            geometry[
+                'y'
+            ]
+        )
+    except Exception:
+        return (
+            None,
+            None,
+        )
+
+    spatial_reference = (
+        geometry.get(
+            'spatialReference'
+        )
+        or
+        {}
     )
 
-    return f'{storm_type} {name}'
+    wkid = int(
+        spatial_reference.get(
+            'latestWkid'
+        )
+        or
+        spatial_reference.get(
+            'wkid'
+        )
+        or
+        3857
+    )
+
+    if wkid in {
+        4326,
+        4269,
+    }:
+        return (
+            x,
+            y,
+        )
+
+    return web_mercator_to_lonlat(
+        x,
+        y,
+    )
+
+
+def nhc_distance_km(
+    lon1: float,
+    lat1: float,
+    lon2: float,
+    lat2: float,
+) -> float:
+    radius_km = 6371.0
+
+    lat1_r = math.radians(
+        lat1
+    )
+    lat2_r = math.radians(
+        lat2
+    )
+
+    delta_lat = math.radians(
+        lat2
+        -
+        lat1
+    )
+
+    delta_lon = math.radians(
+        lon2
+        -
+        lon1
+    )
+
+    value = (
+        math.sin(
+            delta_lat
+            /
+            2.0
+        )
+        **
+        2
+        +
+        math.cos(
+            lat1_r
+        )
+        *
+        math.cos(
+            lat2_r
+        )
+        *
+        math.sin(
+            delta_lon
+            /
+            2.0
+        )
+        **
+        2
+    )
+
+    return (
+        2.0
+        *
+        radius_km
+        *
+        math.asin(
+            min(
+                1.0,
+                math.sqrt(
+                    value
+                ),
+            )
+        )
+    )
+
+
+def nhc_match_invest_ids_to_outlook(
+    basin: str,
+    point_features: list[dict[str, Any]],
+) -> list[str]:
+    if not point_features:
+        return []
+
+    active_invests = nhc_active_atcf_invests(
+        basin
+    )
+
+    if not active_invests:
+        return []
+
+    candidates: list[
+        tuple[
+            float,
+            str,
+            int,
+        ]
+    ] = []
+
+    for point_index, feature in enumerate(
+        point_features
+    ):
+        point_lon, point_lat = (
+            nhc_gtwo_point_lonlat(
+                feature
+            )
+        )
+
+        if (
+            point_lon is None
+            or
+            point_lat is None
+        ):
+            continue
+
+        for invest in active_invests:
+            distance = nhc_distance_km(
+                point_lon,
+                point_lat,
+                invest.lon,
+                invest.lat,
+            )
+
+            if distance <= 650.0:
+                candidates.append(
+                    (
+                        distance,
+                        invest.invest_id,
+                        point_index,
+                    )
+                )
+
+    candidates.sort(
+        key=lambda item:
+            item[0]
+    )
+
+    used_points: set[int] = set()
+    used_invests: set[str] = set()
+    matched: list[str] = []
+
+    for (
+        _distance,
+        invest_id,
+        point_index,
+    ) in candidates:
+        if (
+            point_index in used_points
+            or
+            invest_id in used_invests
+        ):
+            continue
+
+        used_points.add(
+            point_index
+        )
+        used_invests.add(
+            invest_id
+        )
+        matched.append(
+            invest_id
+        )
+
+    return matched
 
 
 def nhc_wind_mph(
     text: str,
 ) -> Optional[int]:
-    winds = find_nhc_field(
-        text,
-        'MAXIMUM SUSTAINED WINDS',
+    winds = (
+        find_nhc_field(
+            text,
+            'MAXIMUM SUSTAINED WINDS',
+        )
+        or
+        find_nhc_field(
+            text,
+            'MAX SUSTAINED WINDS',
+        )
     )
 
     match = re.search(
         r'\b(\d+)\s*MPH\b',
         winds,
         re.I,
+    )
+
+    if match:
+        return int(
+            match.group(
+                1
+            )
+        )
+
+    match = re.search(
+        r'(?i)'
+        r'maximum sustained winds '
+        r'(?:are|near|now estimated to be)\s+'
+        r'(\d+)\s*mph',
+        text,
     )
 
     if not match:
@@ -8762,131 +9220,430 @@ def nhc_wind_mph(
     )
 
 
-def nhc_movement_bearing(
-    text: str,
-) -> Optional[float]:
-    movement = (
-        find_nhc_field(
-            text,
-            'PRESENT MOVEMENT',
+def nhc_basin_matches(
+    value: Any,
+    basin: str,
+) -> bool:
+    text = squish(
+        str(
+            value
+            or
+            ''
         )
-        or
-        find_nhc_field(
-            text,
-            'MOVEMENT',
-        )
-    )
+    ).lower()
 
-    if not movement:
-        return None
+    if not text:
+        return True
 
-    degree_match = re.search(
-        r'\b(\d{1,3})\s+DEGREES\b',
-        movement,
-        re.I,
-    )
-
-    if degree_match:
+    if basin == 'atlantic':
         return (
-            float(
-                degree_match.group(
-                    1
-                )
-            )
-            %
-            360.0
+            'atlantic'
+            in
+            text
+            or
+            text in {
+                'atl',
+                'al',
+            }
         )
 
-    direction_match = re.search(
-        r'\b'
-        r'(NNE|ENE|ESE|SSE|'
-        r'SSW|WSW|WNW|NNW|'
-        r'NE|SE|SW|NW|'
-        r'N|E|S|W)'
-        r'\b',
-        movement.upper(),
-    )
+    if basin == 'epac':
+        return (
+            (
+                'east'
+                in
+                text
+                or
+                'eastern'
+                in
+                text
+            )
+            and
+            'pac'
+            in
+            text
+        ) or text in {
+            'epac',
+            'ep',
+        }
 
-    if not direction_match:
-        return None
+    if basin == 'cpac':
+        return (
+            'central'
+            in
+            text
+            and
+            'pac'
+            in
+            text
+        ) or text in {
+            'cpac',
+            'cp',
+        }
 
-    bearings = {
-        'N': 0.0,
-        'NNE': 22.5,
-        'NE': 45.0,
-        'ENE': 67.5,
-        'E': 90.0,
-        'ESE': 112.5,
-        'SE': 135.0,
-        'SSE': 157.5,
-        'S': 180.0,
-        'SSW': 202.5,
-        'SW': 225.0,
-        'WSW': 247.5,
-        'W': 270.0,
-        'WNW': 292.5,
-        'NW': 315.0,
-        'NNW': 337.5,
+    return True
+
+
+def nhc_two_basin_extent(
+    basin: str,
+) -> tuple[
+    float,
+    float,
+    float,
+    float,
+]:
+    extents = {
+        'atlantic': (
+            -100.0,
+            5.0,
+            -10.0,
+            45.0,
+        ),
+        'epac': (
+            -145.0,
+            5.0,
+            -75.0,
+            35.0,
+        ),
+        'cpac': (
+            -180.0,
+            5.0,
+            -140.0,
+            35.0,
+        ),
     }
 
-    return bearings.get(
-        direction_match.group(
-            1
-        )
+    return extents.get(
+        basin,
+        (
+            -180.0,
+            0.0,
+            -10.0,
+            50.0,
+        ),
     )
 
 
-def nhc_map_marker_color(
-    wind_mph: Optional[int],
-) -> tuple[
-    int,
-    int,
-    int,
-    int,
+def nhc_arcgis_geometry_points(
+    geometry: dict[str, Any],
+) -> list[
+    tuple[
+        float,
+        float,
+    ]
 ]:
-    if wind_mph is None:
-        return (
-            201,
-            42,
-            42,
-            255,
+    points: list[
+        tuple[
+            float,
+            float,
+        ]
+    ] = []
+
+    if (
+        'x'
+        in
+        geometry
+        and
+        'y'
+        in
+        geometry
+    ):
+        try:
+            points.append(
+                (
+                    float(
+                        geometry[
+                            'x'
+                        ]
+                    ),
+                    float(
+                        geometry[
+                            'y'
+                        ]
+                    ),
+                )
+            )
+        except Exception:
+            pass
+
+    for collection_name in (
+        'rings',
+        'paths',
+        'points',
+    ):
+        collection = (
+            geometry.get(
+                collection_name
+            )
+            or
+            []
         )
 
-    if wind_mph >= 111:
-        return (
-            143,
-            32,
-            32,
-            255,
+        for part in collection:
+            if (
+                isinstance(
+                    part,
+                    (list, tuple),
+                )
+                and
+                len(
+                    part
+                )
+                >=
+                2
+                and
+                isinstance(
+                    part[0],
+                    (int, float),
+                )
+            ):
+                try:
+                    points.append(
+                        (
+                            float(
+                                part[0]
+                            ),
+                            float(
+                                part[1]
+                            ),
+                        )
+                    )
+                except Exception:
+                    pass
+
+                continue
+
+            if not isinstance(
+                part,
+                (list, tuple),
+            ):
+                continue
+
+            for coordinate in part:
+                if (
+                    not isinstance(
+                        coordinate,
+                        (list, tuple),
+                    )
+                    or
+                    len(
+                        coordinate
+                    )
+                    <
+                    2
+                ):
+                    continue
+
+                try:
+                    points.append(
+                        (
+                            float(
+                                coordinate[0]
+                            ),
+                            float(
+                                coordinate[1]
+                            ),
+                        )
+                    )
+                except Exception:
+                    pass
+
+    return points
+
+
+def nhc_export_summary_overlay(
+    bbox: tuple[
+        float,
+        float,
+        float,
+        float,
+    ],
+    width: int,
+    height: int,
+    layers: Iterable[int],
+    *,
+    layer_where: str = '',
+) -> Image.Image:
+    layer_ids = [
+        int(
+            layer
+        )
+        for layer
+        in layers
+    ]
+
+    params: dict[str, Any] = {
+        'bbox':
+            ','.join(
+                f'{value:.3f}'
+                for value
+                in bbox
+            ),
+        'bboxSR':
+            '3857',
+        'imageSR':
+            '3857',
+        'size':
+            f'{width},{height}',
+        'format':
+            'png32',
+        'transparent':
+            'true',
+        'layers':
+            'show:'
+            +
+            ','.join(
+                str(
+                    layer
+                )
+                for layer
+                in layer_ids
+            ),
+        'f':
+            'image',
+    }
+
+    if layer_where:
+        params[
+            'layerDefs'
+        ] = json.dumps(
+            {
+                str(
+                    layer
+                ):
+                    layer_where
+                for layer
+                in layer_ids
+            },
+            separators=(
+                ',',
+                ':',
+            ),
         )
 
-    if wind_mph >= 74:
-        return (
-            191,
-            47,
-            47,
-            255,
+    try:
+        response = http_get(
+            f'{NHC_TROPICAL_MAPSERVER}/export',
+            params=params,
+            headers={
+                'Accept':
+                    'image/png,*/*'
+            },
+            timeout=(
+                8,
+                45,
+            ),
         )
 
-    if wind_mph >= 39:
-        return (
-            222,
-            93,
-            38,
-            255,
+    except requests.HTTPError:
+        if not layer_where:
+            raise
+
+        params.pop(
+            'layerDefs',
+            None,
+        )
+
+        response = http_get(
+            f'{NHC_TROPICAL_MAPSERVER}/export',
+            params=params,
+            headers={
+                'Accept':
+                    'image/png,*/*'
+            },
+            timeout=(
+                8,
+                45,
+            ),
         )
 
     return (
-        235,
-        159,
-        52,
-        255,
+        Image.open(
+            io.BytesIO(
+                response.content
+            )
+        )
+        .convert(
+            'RGBA'
+        )
     )
 
 
-def nhc_lonlat_pixel(
-    lon: float,
-    lat: float,
+def nhc_probability_features(
+    basin: str,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    point_features = arcgis_query_features(
+        NHC_TROPICAL_MAPSERVER,
+        NHC_TWO_CURRENT_LAYER,
+        out_fields=(
+            'objectid,basin,prob2day,risk2day,'
+            'prob7day,risk7day,idp_source,'
+            'idp_filedate,idp_ingestdate'
+        ),
+        return_geometry=True,
+        out_sr=3857,
+    )
+
+    region_features = arcgis_query_features(
+        NHC_TROPICAL_MAPSERVER,
+        NHC_TWO_REGION_LAYER,
+        out_fields=(
+            'objectid,basin,prob2day,risk2day,'
+            'prob7day,risk7day,idp_source,'
+            'idp_filedate,idp_ingestdate'
+        ),
+        return_geometry=True,
+        out_sr=3857,
+    )
+
+    point_features = [
+        feature
+        for feature
+        in point_features
+        if nhc_basin_matches(
+            (
+                feature.get(
+                    'attributes'
+                )
+                or
+                {}
+            ).get(
+                'basin'
+            ),
+            basin,
+        )
+    ]
+
+    region_features = [
+        feature
+        for feature
+        in region_features
+        if nhc_basin_matches(
+            (
+                feature.get(
+                    'attributes'
+                )
+                or
+                {}
+            ).get(
+                'basin'
+            ),
+            basin,
+        )
+    ]
+
+    return (
+        point_features,
+        region_features,
+    )
+
+
+def nhc_point_pixel_from_mercator(
+    x: float,
+    y: float,
     bbox: tuple[
         float,
         float,
@@ -8899,11 +9656,6 @@ def nhc_lonlat_pixel(
     int,
     int,
 ]:
-    x, y = lonlat_to_web_mercator(
-        lon,
-        lat,
-    )
-
     minx, miny, maxx, maxy = bbox
 
     px = int(
@@ -8958,268 +9710,229 @@ def nhc_lonlat_pixel(
     )
 
 
-def nhc_draw_movement_arrow(
-    draw: ImageDraw.ImageDraw,
-    start: tuple[
-        int,
-        int,
+def nhc_draw_probability_labels(
+    image: Image.Image,
+    point_features: list[dict[str, Any]],
+    bbox: tuple[
+        float,
+        float,
+        float,
+        float,
     ],
-    bearing: float,
-) -> None:
-    length = 105
-    radians = math.radians(
-        bearing
+) -> Image.Image:
+    out = image.copy().convert(
+        'RGBA'
     )
 
-    x0, y0 = start
+    draw = ImageDraw.Draw(
+        out,
+        'RGBA',
+    )
 
-    x1 = (
-        x0
-        +
-        int(
-            round(
-                math.sin(
-                    radians
+    font = load_font(
+        22,
+        True,
+    )
+
+    width, height = out.size
+
+    for index, feature in enumerate(
+        point_features
+    ):
+        geometry = (
+            feature.get(
+                'geometry'
+            )
+            or
+            {}
+        )
+
+        try:
+            x = float(
+                geometry[
+                    'x'
+                ]
+            )
+
+            y = float(
+                geometry[
+                    'y'
+                ]
+            )
+
+        except Exception:
+            continue
+
+        attrs = (
+            feature.get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        probability_2 = squish(
+            str(
+                attrs.get(
+                    'prob2day'
                 )
-                *
-                length
+                or
+                ''
             )
         )
-    )
 
-    y1 = (
-        y0
-        -
-        int(
-            round(
-                math.cos(
-                    radians
+        probability_7 = squish(
+            str(
+                attrs.get(
+                    'prob7day'
                 )
-                *
-                length
+                or
+                ''
             )
         )
-    )
 
-    draw.line(
-        (
-            x0,
-            y0,
-            x1,
-            y1,
-        ),
-        fill=(
-            255,
-            255,
-            255,
-            245,
-        ),
-        width=11,
-    )
-
-    draw.line(
-        (
-            x0,
-            y0,
-            x1,
-            y1,
-        ),
-        fill=(
-            36,
-            57,
-            82,
-            255,
-        ),
-        width=6,
-    )
-
-    head = 20
-
-    left_angle = (
-        radians
-        +
-        math.radians(
-            155
-        )
-    )
-
-    right_angle = (
-        radians
-        -
-        math.radians(
-            155
-        )
-    )
-
-    left = (
-        x1
-        +
-        int(
-            round(
-                math.sin(
-                    left_angle
-                )
-                *
-                head
-            )
-        ),
-        y1
-        -
-        int(
-            round(
-                math.cos(
-                    left_angle
-                )
-                *
-                head
-            )
-        ),
-    )
-
-    right = (
-        x1
-        +
-        int(
-            round(
-                math.sin(
-                    right_angle
-                )
-                *
-                head
-            )
-        ),
-        y1
-        -
-        int(
-            round(
-                math.cos(
-                    right_angle
-                )
-                *
-                head
-            )
-        ),
-    )
-
-    draw.polygon(
-        [
+        if not any(
             (
-                x1,
-                y1,
+                probability_2,
+                probability_7,
+            )
+        ):
+            continue
+
+        if (
+            probability_2
+            and
+            probability_7
+        ):
+            label = (
+                f'2d {probability_2}  '
+                f'7d {probability_7}'
+            )
+
+        elif probability_7:
+            label = (
+                f'7d {probability_7}'
+            )
+
+        else:
+            label = (
+                f'2d {probability_2}'
+            )
+
+        px, py = (
+            nhc_point_pixel_from_mercator(
+                x,
+                y,
+                bbox,
+                width,
+                height,
+            )
+        )
+
+        text_box = draw.textbbox(
+            (
+                0,
+                0,
             ),
-            left,
-            right,
-        ],
-        fill=(
-            36,
-            57,
-            82,
-            255,
-        ),
-    )
+            label,
+            font=font,
+            stroke_width=2,
+        )
+
+        text_width = (
+            text_box[2]
+            -
+            text_box[0]
+        )
+
+        text_height = (
+            text_box[3]
+            -
+            text_box[1]
+        )
+
+        label_x = min(
+            max(
+                8,
+                px + 18,
+            ),
+            width
+            -
+            text_width
+            -
+            10,
+        )
+
+        vertical_offset = (
+            -26
+            if
+            index % 2 == 0
+            else
+            12
+        )
+
+        label_y = min(
+            max(
+                8,
+                py
+                +
+                vertical_offset,
+            ),
+            height
+            -
+            text_height
+            -
+            8,
+        )
+
+        draw.text(
+            (
+                label_x,
+                label_y,
+            ),
+            label,
+            font=font,
+            fill=(
+                16,
+                22,
+                29,
+                255,
+            ),
+            stroke_width=3,
+            stroke_fill=(
+                255,
+                255,
+                255,
+                245,
+            ),
+        )
+
+    return out
 
 
-def build_mapbox_nhc_storm_map(
-    item: RSSItem,
-    kind: str,
+def build_mapbox_nhc_invest_map(
     basin: str,
 ) -> str:
     width = 1200
     height = 760
 
-    raw = item.multiline_text
-
-    track = nhc_unwrap_track_longitudes(
-        nhc_forecast_points(
-            raw
-        )[:7]
-    )
-
-    current_lon, current_lat = (
-        nhc_lonlat_from_text(
-            raw
+    point_features, region_features = (
+        nhc_probability_features(
+            basin
         )
     )
 
-    if track:
-        if (
-            current_lon is None
-            or
-            current_lat is None
-        ):
-            current_lon = track[0][1]
-            current_lat = track[0][2]
-
-        elif (
-            abs(
-                current_lon
-                -
-                track[0][1]
-            )
-            >
-            180.0
-        ):
-            while (
-                current_lon
-                -
-                track[0][1]
-                >
-                180.0
-            ):
-                current_lon -= 360.0
-
-            while (
-                current_lon
-                -
-                track[0][1]
-                <
-                -180.0
-            ):
-                current_lon += 360.0
-
     if (
-        current_lon is None
-        or
-        current_lat is None
+        not point_features
+        and
+        not region_features
     ):
         return ''
 
-    map_points: list[
-        tuple[
-            float,
-            float,
-        ]
-    ] = []
-
-    if track:
-        map_points.extend(
-            lonlat_to_web_mercator(
-                lon,
-                lat,
-            )
-            for (
-                _label,
-                lon,
-                lat,
-                _mph,
-            )
-            in track
+    bbox = mercator_bbox_from_lonlat(
+        *nhc_two_basin_extent(
+            basin
         )
-
-    map_points.append(
-        lonlat_to_web_mercator(
-            current_lon,
-            current_lat,
-        )
-    )
-
-    bbox = mercator_bbox_from_points(
-        map_points,
-        width,
-        height,
-        padding_factor=1.65,
-        min_width_m=2400000.0,
-        min_height_m=1450000.0,
     )
 
     base = fetch_mapbox_light_base(
@@ -9228,561 +9941,1062 @@ def build_mapbox_nhc_storm_map(
         height,
     )
 
-    base = add_reference_boundaries(
-        base,
+    exact_basin_value = first_nonempty(
+        (
+            (
+                feature.get(
+                    'attributes'
+                )
+                or
+                {}
+            ).get(
+                'basin'
+            )
+            for feature
+            in (
+                point_features
+                +
+                region_features
+            )
+        )
+    )
+
+    layer_where = (
+        'basin = '
+        +
+        sql_quote(
+            exact_basin_value
+        )
+        if
+        exact_basin_value
+        else
+        ''
+    )
+
+    overlay = nhc_export_summary_overlay(
         bbox,
-        counties=False,
-        states=True,
+        width,
+        height,
+        (
+            NHC_TWO_CURRENT_LAYER,
+            NHC_TWO_REGION_LAYER,
+        ),
+        layer_where=
+            layer_where,
+    )
+
+    base.alpha_composite(
+        overlay
+    )
+
+    base = nhc_draw_probability_labels(
+        base,
+        point_features,
+        bbox,
+    )
+
+    return save_map_image(
+        base,
+        prefix='nhc_invest_',
+    )
+
+
+def nhc_normalized_storm_token(
+    value: Any,
+) -> str:
+    return re.sub(
+        r'[^A-Z0-9]+',
+        '',
+        str(
+            value
+            or
+            ''
+        ).upper(),
+    )
+
+
+def nhc_feature_distance_score(
+    features: list[dict[str, Any]],
+    current_lon: Optional[float],
+    current_lat: Optional[float],
+) -> float:
+    if (
+        current_lon is None
+        or
+        current_lat is None
+    ):
+        return 0.0
+
+    current_x, current_y = (
+        lonlat_to_web_mercator(
+            current_lon,
+            current_lat,
+        )
+    )
+
+    distances: list[float] = []
+
+    for feature in features:
+        geometry = (
+            feature.get(
+                'geometry'
+            )
+            or
+            {}
+        )
+
+        if (
+            'x'
+            not in
+            geometry
+            or
+            'y'
+            not in
+            geometry
+        ):
+            continue
+
+        try:
+            dx = (
+                float(
+                    geometry[
+                        'x'
+                    ]
+                )
+                -
+                current_x
+            )
+
+            dy = (
+                float(
+                    geometry[
+                        'y'
+                    ]
+                )
+                -
+                current_y
+            )
+
+        except Exception:
+            continue
+
+        distances.append(
+            math.hypot(
+                dx,
+                dy,
+            )
+        )
+
+    if not distances:
+        return 0.0
+
+    distance_km = (
+        min(
+            distances
+        )
+        /
+        1000.0
+    )
+
+    return max(
+        0.0,
+        40.0
+        -
+        min(
+            40.0,
+            distance_km
+            /
+            75.0,
+        ),
+    )
+
+
+def nhc_select_forecast_group(
+    item: RSSItem,
+    basin: str,
+) -> tuple[
+    list[dict[str, Any]],
+    str,
+    str,
+]:
+    _storm_type, storm_name = (
+        nhc_storm_identity(
+            item
+        )
+    )
+
+    if not storm_name:
+        return (
+            [],
+            '',
+            '',
+        )
+
+    features = arcgis_query_features(
+        NHC_TROPICAL_MAPSERVER,
+        NHC_FORECAST_POINTS_LAYER,
+        out_fields='*',
+        return_geometry=True,
+        out_sr=3857,
+    )
+
+    groups: dict[
+        str,
+        list[dict[str, Any]],
+    ] = {}
+
+    for feature in features:
+        attrs = (
+            feature.get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        if not nhc_basin_matches(
+            attrs.get(
+                'basin'
+            ),
+            basin,
+        ):
+            continue
+
+        group_key = squish(
+            str(
+                attrs.get(
+                    'idp_source'
+                )
+                or
+                attrs.get(
+                    'stormname'
+                )
+                or
+                ''
+            )
+        )
+
+        if not group_key:
+            continue
+
+        groups.setdefault(
+            group_key,
+            [],
+        ).append(
+            feature
+        )
+
+    if not groups:
+        return (
+            [],
+            '',
+            '',
+        )
+
+    current_lon, current_lat = (
+        nhc_lonlat_from_text(
+            item.multiline_text
+        )
+    )
+
+    wanted_name = (
+        nhc_normalized_storm_token(
+            storm_name
+        )
+    )
+
+    ranked: list[
+        tuple[
+            int,
+            float,
+            float,
+            str,
+        ]
+    ] = []
+
+    for group_key, group in groups.items():
+        attrs = (
+            group[0].get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        candidate_name = (
+            nhc_normalized_storm_token(
+                attrs.get(
+                    'stormname'
+                )
+            )
+        )
+
+        if (
+            not candidate_name
+            or
+            not wanted_name
+        ):
+            name_rank = 0
+        elif candidate_name == wanted_name:
+            name_rank = 2
+        elif (
+            candidate_name in wanted_name
+            or
+            wanted_name in candidate_name
+        ):
+            name_rank = 1
+        else:
+            name_rank = 0
+
+        if name_rank == 0:
+            continue
+
+        latest_ingest = 0.0
+
+        for feature in group:
+            feature_attrs = (
+                feature.get(
+                    'attributes'
+                )
+                or
+                {}
+            )
+
+            for key in (
+                'idp_ingestdate',
+                'idp_filedate',
+            ):
+                value = feature_attrs.get(
+                    key
+                )
+
+                if value in (
+                    None,
+                    '',
+                ):
+                    continue
+
+                try:
+                    numeric = float(
+                        value
+                    )
+                except Exception:
+                    dt = arcgis_datetime(
+                        value
+                    )
+                    numeric = (
+                        dt.timestamp()
+                        *
+                        1000.0
+                        if dt
+                        else
+                        0.0
+                    )
+
+                latest_ingest = max(
+                    latest_ingest,
+                    numeric,
+                )
+
+        distance_score = (
+            nhc_feature_distance_score(
+                group,
+                current_lon,
+                current_lat,
+            )
+        )
+
+        ranked.append(
+            (
+                name_rank,
+                latest_ingest,
+                distance_score,
+                group_key,
+            )
+        )
+
+    if not ranked:
+        return (
+            [],
+            '',
+            '',
+        )
+
+    ranked.sort(
+        reverse=True
+    )
+
+    best_key = ranked[0][3]
+    selected = groups.get(
+        best_key,
+        [],
+    )
+
+    if not selected:
+        return (
+            [],
+            '',
+            '',
+        )
+
+    selected_attrs = (
+        selected[0].get(
+            'attributes'
+        )
+        or
+        {}
+    )
+
+    selected_storm_name = squish(
+        str(
+            selected_attrs.get(
+                'stormname'
+            )
+            or
+            storm_name
+        )
+    )
+
+    selected_source = squish(
+        str(
+            selected_attrs.get(
+                'idp_source'
+            )
+            or
+            best_key
+        )
+    )
+
+    def forecast_tau(
+        feature: dict[str, Any],
+    ) -> float:
+        attrs = (
+            feature.get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        try:
+            return float(
+                attrs.get(
+                    'tau'
+                )
+                if attrs.get(
+                    'tau'
+                ) is not None
+                else
+                attrs.get(
+                    'fcstprd'
+                )
+                or
+                0.0
+            )
+        except Exception:
+            return 0.0
+
+    selected.sort(
+        key=forecast_tau
+    )
+
+    return (
+        selected,
+        selected_storm_name,
+        selected_source,
+    )
+
+
+def nhc_knots_to_mph(
+    value: Any,
+) -> Optional[int]:
+    try:
+        knots = float(
+            value
+        )
+    except Exception:
+        return None
+
+    if knots < 0:
+        return None
+
+    mph = (
+        knots
+        *
+        1.15078
+    )
+
+    return int(
+        round(
+            mph
+            /
+            5.0
+        )
+        *
+        5
+    )
+
+
+def nhc_draw_named_wind_labels(
+    image: Image.Image,
+    forecast_points: list[dict[str, Any]],
+    bbox: tuple[
+        float,
+        float,
+        float,
+        float,
+    ],
+    *,
+    current_lon: Optional[float],
+    current_lat: Optional[float],
+    current_wind_mph: Optional[int],
+) -> Image.Image:
+    out = image.copy().convert(
+        'RGBA'
     )
 
     draw = ImageDraw.Draw(
-        base,
+        out,
         'RGBA',
     )
 
-    title_font = load_font(
-        40,
-        True,
-    )
-
-    subtitle_font = load_font(
-        23,
-        False,
-    )
-
-    info_font = load_font(
-        24,
-        False,
-    )
-
-    point_font = load_font(
+    font = load_font(
         19,
         True,
     )
 
-    small_font = load_font(
-        17,
-        False,
-    )
+    width, height = out.size
 
-    product_labels = {
-        'tcp':
-            'Public Advisory',
-        'tcu':
-            'Tropical Cyclone Update',
-        'tcd':
-            'Forecast Discussion',
-        'tcm':
-            'Forecast Advisory',
-    }
-
-    storm_name = (
-        nhc_storm_name(
-            item
-        )
-        or
-        'Tropical Cyclone'
-    )
-
-    issued = (
-        find_local_issue_clock(
-            raw
-        )
-        or
-        (
-            item.published.strftime(
-                '%-I:%M %p UTC'
-            )
-            if item.published
-            else
-            ''
-        )
-    )
-
-    header_right = 720
-
-    draw.rounded_rectangle(
-        (
-            26,
-            24,
-            header_right,
-            132,
-        ),
-        radius=22,
-        fill=(
-            255,
-            255,
-            255,
-            226,
-        ),
-        outline=(
-            0,
-            0,
-            0,
-            35,
-        ),
-        width=2,
-    )
-
-    draw.text(
-        (
-            50,
-            39,
-        ),
-        truncate(
-            storm_name,
-            38,
-        ),
-        font=title_font,
-        fill=(
-            20,
-            29,
-            42,
-            255,
-        ),
-    )
-
-    subtitle = product_labels.get(
-        kind,
-        'Tropical Cyclone Update',
-    )
-
-    if issued:
-        subtitle += (
-            ' | Issued '
-            +
-            issued
-        )
-
-    draw.text(
-        (
-            52,
-            91,
-        ),
-        truncate(
-            subtitle,
-            74,
-        ),
-        font=subtitle_font,
-        fill=(
-            57,
-            74,
-            96,
-            255,
-        ),
-    )
-
-    winds = find_nhc_field(
-        raw,
-        'MAXIMUM SUSTAINED WINDS',
-    )
-
-    movement = find_nhc_field(
-        raw,
-        'PRESENT MOVEMENT',
-    )
-
-    pressure = find_nhc_field(
-        raw,
-        'MINIMUM CENTRAL PRESSURE',
-    )
-
-    info_lines: list[str] = []
-
-    location = nhc_center_location(
-        raw
-    )
-
-    if location:
-        info_lines.append(
-            'Center: '
-            +
-            truncate(
-                location,
-                34,
-            )
-        )
-
-    if winds:
-        info_lines.append(
-            'Winds: '
-            +
-            truncate(
-                winds,
-                34,
-            )
-        )
-
-    if movement:
-        info_lines.append(
-            'Movement: '
-            +
-            truncate(
-                movement,
-                34,
-            )
-        )
-
-    if pressure:
-        info_lines.append(
-            'Pressure: '
-            +
-            truncate(
-                pressure,
-                34,
-            )
-        )
-
-    if info_lines:
-        card_left = 760
-        card_top = 24
-        card_bottom = (
-            card_top
-            +
-            30
-            +
-            len(
-                info_lines
-            )
-            *
-            34
-            +
-            24
-        )
-
-        draw.rounded_rectangle(
-            (
-                card_left,
-                card_top,
-                width - 26,
-                card_bottom,
-            ),
-            radius=22,
-            fill=(
-                255,
-                255,
-                255,
-                226,
-            ),
-            outline=(
-                0,
-                0,
-                0,
-                35,
-            ),
-            width=2,
-        )
-
-        y = card_top + 22
-
-        for line in info_lines:
-            draw.text(
-                (
-                    card_left + 22,
-                    y,
-                ),
-                line,
-                font=info_font,
-                fill=(
-                    38,
-                    50,
-                    69,
-                    255,
-                ),
-            )
-
-            y += 34
-
-    if len(
-        track
-    ) >= 2:
-        track_pixels = [
-            nhc_lonlat_pixel(
-                lon,
-                lat,
-                bbox,
-                width,
-                height,
-            )
-            for (
-                _label,
-                lon,
-                lat,
-                _mph,
-            )
-            in track
+    selected_points: list[
+        tuple[
+            int,
+            dict[str, Any],
         ]
+    ] = []
 
-        draw.line(
-            track_pixels,
-            fill=(
-                255,
-                255,
-                255,
-                245,
-            ),
-            width=12,
-            joint='curve',
+    for index, feature in enumerate(
+        forecast_points
+    ):
+        attrs = (
+            feature.get(
+                'attributes'
+            )
+            or
+            {}
         )
 
-        draw.line(
-            track_pixels,
-            fill=(
-                37,
-                69,
-                106,
-                255,
-            ),
-            width=7,
-            joint='curve',
-        )
+        try:
+            tau = int(
+                round(
+                    float(
+                        attrs.get(
+                            'tau'
+                        )
+                        if attrs.get(
+                            'tau'
+                        ) is not None
+                        else
+                        attrs.get(
+                            'fcstprd'
+                        )
+                        or
+                        0.0
+                    )
+                )
+            )
+        except Exception:
+            tau = index
 
-        for (
-            index,
-            (
-                label,
-                lon,
-                lat,
-                mph,
-            ),
-        ) in enumerate(
-            track
+        if (
+            tau == 0
+            or
+            tau in {
+                12,
+                24,
+                36,
+                48,
+                60,
+                72,
+                96,
+                120,
+            }
         ):
-            px, py = nhc_lonlat_pixel(
-                lon,
-                lat,
+            selected_points.append(
+                (
+                    tau,
+                    feature,
+                )
+            )
+
+    if not selected_points:
+        return out
+
+    for point_index, (
+        tau,
+        feature,
+    ) in enumerate(
+        selected_points
+    ):
+        attrs = (
+            feature.get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        geometry = (
+            feature.get(
+                'geometry'
+            )
+            or
+            {}
+        )
+
+        if (
+            tau == 0
+            and
+            current_lon is not None
+            and
+            current_lat is not None
+        ):
+            point_x, point_y = (
+                lonlat_to_web_mercator(
+                    current_lon,
+                    current_lat,
+                )
+            )
+        else:
+            try:
+                point_x = float(
+                    geometry[
+                        'x'
+                    ]
+                )
+                point_y = float(
+                    geometry[
+                        'y'
+                    ]
+                )
+            except Exception:
+                continue
+
+        px, py = (
+            nhc_point_pixel_from_mercator(
+                point_x,
+                point_y,
                 bbox,
                 width,
                 height,
             )
+        )
 
-            radius = (
-                15
-                if index == 0
-                else
-                10
+        if (
+            tau == 0
+            and
+            current_wind_mph is not None
+        ):
+            wind_mph = current_wind_mph
+        else:
+            wind_mph = nhc_knots_to_mph(
+                attrs.get(
+                    'maxwind'
+                )
             )
 
-            color = nhc_map_marker_color(
-                mph
+        if wind_mph is None:
+            continue
+
+        label = (
+            f'{wind_mph} mph'
+        )
+
+        text_box = draw.textbbox(
+            (
+                0,
+                0,
+            ),
+            label,
+            font=font,
+            stroke_width=2,
+        )
+
+        text_width = (
+            text_box[2]
+            -
+            text_box[0]
+        )
+
+        text_height = (
+            text_box[3]
+            -
+            text_box[1]
+        )
+
+        label_x = (
+            px
+            +
+            13
+        )
+
+        if (
+            label_x
+            +
+            text_width
+            >
+            width
+            -
+            8
+        ):
+            label_x = (
+                px
+                -
+                text_width
+                -
+                13
             )
 
+        label_y = (
+            py
+            -
+            text_height
+            -
+            10
+            if point_index % 2 == 0
+            else
+            py
+            +
+            10
+        )
+
+        label_y = min(
+            max(
+                8,
+                label_y,
+            ),
+            height
+            -
+            text_height
+            -
+            8,
+        )
+
+        draw.text(
+            (
+                label_x,
+                label_y,
+            ),
+            label,
+            font=font,
+            fill=(
+                0,
+                0,
+                0,
+                255,
+            ),
+            stroke_width=3,
+            stroke_fill=(
+                255,
+                255,
+                255,
+                248,
+            ),
+        )
+
+        if (
+            tau == 0
+            and
+            current_lon is not None
+            and
+            current_lat is not None
+        ):
             draw.ellipse(
                 (
-                    px - radius - 4,
-                    py - radius - 4,
-                    px + radius + 4,
-                    py + radius + 4,
+                    px - 6,
+                    py - 6,
+                    px + 6,
+                    py + 6,
                 ),
                 fill=(
+                    0,
+                    0,
+                    0,
                     255,
-                    255,
-                    255,
-                    245,
                 ),
-            )
-
-            draw.ellipse(
-                (
-                    px - radius,
-                    py - radius,
-                    px + radius,
-                    py + radius,
-                ),
-                fill=color,
                 outline=(
-                    27,
-                    37,
-                    50,
+                    255,
+                    255,
+                    255,
                     255,
                 ),
                 width=2,
             )
 
-            if index > 0:
-                label_text = label
+    return out
 
-                if mph:
-                    label_text += (
-                        f' {mph} mph'
+
+def build_mapbox_nhc_storm_map(
+    item: RSSItem,
+    kind: str,
+    basin: str,
+) -> str:
+    _storm_type, parsed_storm_name = (
+        nhc_storm_identity(
+            item
+        )
+    )
+
+    if not parsed_storm_name:
+        return ''
+
+    forecast_points, gis_storm_name, _gis_source = (
+        nhc_select_forecast_group(
+            item,
+            basin,
+        )
+    )
+
+    if not forecast_points:
+        return ''
+
+    first_attrs = (
+        forecast_points[0].get(
+            'attributes'
+        )
+        or
+        {}
+    )
+
+    where_value = (
+        gis_storm_name
+        or
+        parsed_storm_name
+    )
+
+    where_parts = [
+        'stormname = '
+        +
+        sql_quote(
+            where_value
+        )
+    ]
+
+    advisory_number = squish(
+        str(
+            first_attrs.get(
+                'advisnum'
+            )
+            or
+            ''
+        )
+    )
+
+    if advisory_number:
+        where_parts.append(
+            'advisnum = '
+            +
+            sql_quote(
+                advisory_number
+            )
+        )
+
+    layer_where = (
+        ' AND '.join(
+            where_parts
+        )
+    )
+
+    cone_features = arcgis_query_features(
+        NHC_TROPICAL_MAPSERVER,
+        NHC_FORECAST_CONE_LAYER,
+        where=layer_where,
+        out_fields='*',
+        return_geometry=True,
+        out_sr=3857,
+    )
+
+    if not cone_features:
+        cone_features = arcgis_query_features(
+            NHC_TROPICAL_MAPSERVER,
+            NHC_FORECAST_CONE_LAYER,
+            where=(
+                'stormname = '
+                +
+                sql_quote(
+                    where_value
+                )
+            ),
+            out_fields='*',
+            return_geometry=True,
+            out_sr=3857,
+        )
+
+        if cone_features:
+            latest_advisory = squish(
+                str(
+                    (
+                        cone_features[-1].get(
+                            'attributes'
+                        )
+                        or
+                        {}
+                    ).get(
+                        'advisnum'
                     )
+                    or
+                    ''
+                )
+            )
 
-                text_box = draw.textbbox(
-                    (
-                        0,
-                        0,
-                    ),
-                    label_text,
-                    font=point_font,
+            if latest_advisory:
+                layer_where = (
+                    'stormname = '
+                    +
+                    sql_quote(
+                        where_value
+                    )
+                    +
+                    ' AND advisnum = '
+                    +
+                    sql_quote(
+                        latest_advisory
+                    )
                 )
 
-                text_width = (
-                    text_box[2]
-                    -
-                    text_box[0]
-                )
+                cone_features = [
+                    feature
+                    for feature
+                    in cone_features
+                    if squish(
+                        str(
+                            (
+                                feature.get(
+                                    'attributes'
+                                )
+                                or
+                                {}
+                            ).get(
+                                'advisnum'
+                            )
+                            or
+                            ''
+                        )
+                    )
+                    ==
+                    latest_advisory
+                ]
 
-                label_x = min(
-                    max(
-                        12,
-                        px + 14,
-                    ),
-                    width
-                    -
-                    text_width
-                    -
-                    24,
-                )
+    map_points: list[
+        tuple[
+            float,
+            float,
+        ]
+    ] = []
 
-                label_y = max(
-                    145,
-                    min(
-                        height - 42,
-                        py - 12,
-                    ),
-                )
+    for feature in forecast_points:
+        geometry = (
+            feature.get(
+                'geometry'
+            )
+            or
+            {}
+        )
 
-                draw.rounded_rectangle(
-                    (
-                        label_x - 7,
-                        label_y - 5,
-                        label_x + text_width + 7,
-                        label_y + 25,
-                    ),
-                    radius=10,
-                    fill=(
-                        255,
-                        255,
-                        255,
-                        220,
-                    ),
-                )
+        map_points.extend(
+            nhc_arcgis_geometry_points(
+                geometry
+            )
+        )
 
-                draw.text(
-                    (
-                        label_x,
-                        label_y,
-                    ),
-                    label_text,
-                    font=point_font,
-                    fill=(
-                        27,
-                        37,
-                        50,
-                        255,
-                    ),
-                )
+    for feature in cone_features:
+        geometry = (
+            feature.get(
+                'geometry'
+            )
+            or
+            {}
+        )
 
-    current_pixel = nhc_lonlat_pixel(
-        current_lon,
-        current_lat,
+        map_points.extend(
+            nhc_arcgis_geometry_points(
+                geometry
+            )
+        )
+
+    current_lon, current_lat = (
+        nhc_lonlat_from_text(
+            item.multiline_text
+        )
+    )
+
+    if (
+        current_lon is not None
+        and
+        current_lat is not None
+    ):
+        map_points.append(
+            lonlat_to_web_mercator(
+                current_lon,
+                current_lat,
+            )
+        )
+
+    if not map_points:
+        return ''
+
+    width = 1200
+    height = 760
+
+    bbox = mercator_bbox_from_points(
+        map_points,
+        width,
+        height,
+        padding_factor=1.35,
+        min_width_m=1500000.0,
+        min_height_m=900000.0,
+    )
+
+    base = fetch_mapbox_light_base(
         bbox,
         width,
         height,
     )
 
-    current_wind = (
-        nhc_wind_mph(
-            raw
-        )
-        or
+    overlay = nhc_export_summary_overlay(
+        bbox,
+        width,
+        height,
         (
-            track[0][3]
-            if track
-            else
-            None
-        )
+            NHC_FORECAST_TRACK_LAYER,
+            NHC_FORECAST_CONE_LAYER,
+            NHC_WATCH_WARNING_LAYER,
+            NHC_FORECAST_POINTS_LAYER,
+        ),
+        layer_where=
+            layer_where,
     )
 
-    cx, cy = current_pixel
-
-    draw.ellipse(
-        (
-            cx - 24,
-            cy - 24,
-            cx + 24,
-            cy + 24,
-        ),
-        fill=(
-            255,
-            255,
-            255,
-            248,
-        ),
-        outline=(
-            24,
-            34,
-            48,
-            255,
-        ),
-        width=2,
+    base.alpha_composite(
+        overlay
     )
 
-    draw.ellipse(
-        (
-            cx - 15,
-            cy - 15,
-            cx + 15,
-            cy + 15,
-        ),
-        fill=nhc_map_marker_color(
-            current_wind
-        ),
-        outline=(
-            255,
-            255,
-            255,
-            255,
-        ),
-        width=2,
-    )
-
-    if not track:
-        bearing = nhc_movement_bearing(
-            raw
-        )
-
-        if bearing is not None:
-            nhc_draw_movement_arrow(
-                draw,
-                current_pixel,
-                bearing,
-            )
-
-    draw.rounded_rectangle(
-        (
-            26,
-            height - 52,
-            456,
-            height - 16,
-        ),
-        radius=15,
-        fill=(
-            255,
-            255,
-            255,
-            216,
-        ),
-    )
-
-    draw.text(
-        (
-            42,
-            height - 45,
-        ),
-        'Derived from official NHC advisory data',
-        font=small_font,
-        fill=(
-            58,
-            75,
-            95,
-            255,
-        ),
+    base = nhc_draw_named_wind_labels(
+        base,
+        forecast_points,
+        bbox,
+        current_lon=
+            current_lon,
+        current_lat=
+            current_lat,
+        current_wind_mph=
+            nhc_wind_mph(
+                item.multiline_text
+            ),
     )
 
     return save_map_image(
         base,
-        prefix='nhc_storm_map_',
+        prefix='nhc_storm_',
     )
 
 
@@ -9860,13 +11074,16 @@ def nhc_page_image(
         score = 0
 
         if 'cone' in descriptor:
-            score += 30
+            score += 50
+
+        if '5day' in descriptor:
+            score += 35
 
         if 'forecast' in descriptor:
-            score += 20
+            score += 25
 
         if 'track' in descriptor:
-            score += 15
+            score += 20
 
         if 'graphic' in descriptor:
             score += 10
@@ -9875,9 +11092,13 @@ def nhc_page_image(
             score += 10
 
         if (
-            'gtwo' in descriptor
+            'gtwo'
+            in
+            descriptor
             or
-            '7d0' in descriptor
+            '7d0'
+            in
+            descriptor
         ):
             score += 18
 
@@ -9932,25 +11153,72 @@ def nhc_page_image(
     return ''
 
 
+def nhc_probability_values(
+    raw: str,
+    horizon: str,
+) -> list[int]:
+    if horizon == '2':
+        label_pattern = (
+            r'(?:48\s*hours|2\s*days?)'
+        )
+    else:
+        label_pattern = (
+            r'7\s*days?'
+        )
+
+    values: list[int] = []
+
+    patterns = [
+        rf'Formation chance through\s*'
+        rf'{label_pattern}'
+        rf'[^\n]*?'
+        rf'(\d+)\s*(?:percent|%)',
+        rf'{label_pattern}\s*formation chance'
+        rf'[^\n]*?'
+        rf'(\d+)\s*(?:percent|%)',
+    ]
+
+    for pattern in patterns:
+        for value in re.findall(
+            pattern,
+            raw,
+            re.I,
+        ):
+            try:
+                values.append(
+                    int(
+                        value
+                    )
+                )
+            except Exception:
+                pass
+
+    return values
+
+
 def render_nhc_two(
     item: RSSItem,
     source: str,
 ) -> RenderedPost:
-    basin = (
-        'Atlantic Basin'
+    basin_key = (
+        'atlantic'
         if
         source.endswith(
             'atlantic'
         )
         else
-        'Eastern Pacific'
+        'epac'
         if
         source.endswith(
             'epac'
         )
         else
-        'Central Pacific'
+        'cpac'
     )
+
+    basin = NHC_BASIN_LABELS[
+        basin_key
+    ]
 
     raw = (
         item.multiline_text
@@ -9962,33 +11230,44 @@ def render_nhc_two(
         )
     )
 
-    probabilities_48 = [
-        int(
-            value
-        )
-        for value
-        in re.findall(
-            r'Formation chance through '
-            r'48 hours[^\n]*?'
-            r'(\d+)\s*percent',
+    probabilities_48 = (
+        nhc_probability_values(
             raw,
-            re.I,
+            '2',
         )
-    ]
+    )
 
-    probabilities_7 = [
-        int(
-            value
-        )
-        for value
-        in re.findall(
-            r'Formation chance through '
-            r'7 days[^\n]*?'
-            r'(\d+)\s*percent',
+    probabilities_7 = (
+        nhc_probability_values(
             raw,
-            re.I,
+            '7',
         )
-    ]
+    )
+
+    invests = nhc_invest_ids(
+        raw
+    )
+
+    try:
+        point_features, _region_features = (
+            nhc_probability_features(
+                basin_key
+            )
+        )
+
+        for invest_id in nhc_match_invest_ids_to_outlook(
+            basin_key,
+            point_features,
+        ):
+            if invest_id not in invests:
+                invests.append(
+                    invest_id
+                )
+
+    except Exception:
+        log.exception(
+            'Could not resolve NHC outlook disturbances to ATCF invest identifiers'
+        )
 
     details: list[str] = []
 
@@ -10008,34 +11287,50 @@ def render_nhc_two(
 
     image_path = ''
 
-    image_url = (
-        NHC_TWO_IMAGES.get(
-            source,
-            '',
+    try:
+        image_path = (
+            build_mapbox_nhc_invest_map(
+                basin_key
+            )
         )
-    )
 
-    if image_url:
-        try:
-            image_path = (
-                download_nhc_image_to_temp(
-                    image_url,
-                    prefix='nhc_two_',
-                    referer=(
-                        item.link
-                        or
-                        'https://www.nhc.noaa.gov/'
-                    ),
-                )
-            )
+    except Exception:
+        log.exception(
+            'Could not build clean '
+            'NHC tropical outlook map '
+            'for %s',
+            source,
+        )
 
-        except Exception:
-            log.exception(
-                'Could not download '
-                'NHC graphical outlook '
-                'image for %s',
+    if not image_path:
+        image_url = (
+            NHC_TWO_IMAGES.get(
                 source,
+                '',
             )
+        )
+
+        if image_url:
+            try:
+                image_path = (
+                    download_nhc_image_to_temp(
+                        image_url,
+                        prefix='nhc_two_',
+                        referer=(
+                            item.link
+                            or
+                            'https://www.nhc.noaa.gov/'
+                        ),
+                    )
+                )
+
+            except Exception:
+                log.exception(
+                    'Could not download '
+                    'fallback NHC graphical '
+                    'outlook image for %s',
+                    source,
+                )
 
     if (
         not image_path
@@ -10057,29 +11352,62 @@ def render_nhc_two(
                 source,
             )
 
+    if len(
+        invests
+    ) == 1:
+        first_line = (
+            f'Invest {invests[0]}'
+        )
+
+    elif invests:
+        first_line = (
+            'Invests '
+            +
+            ', '.join(
+                invests
+            )
+        )
+
+    else:
+        first_line = (
+            'Tropical Weather Outlook'
+        )
+
+    post_lines = [
+        first_line,
+    ]
+
+    if first_line != 'Tropical Weather Outlook':
+        post_lines.append(
+            'Tropical Weather Outlook'
+        )
+
+    post_lines.extend(
+        [
+            basin,
+            (
+                f'Issued {issued}'
+                if issued
+                else
+                (
+                    'Issued '
+                    +
+                    item.published.strftime(
+                        '%-I:%M %p UTC'
+                    )
+                    if
+                    item.published
+                    else
+                    ''
+                )
+            ),
+            *details,
+        ]
+    )
+
     return RenderedPost(
         fit_post(
-            [
-                'Tropical Weather Outlook',
-                basin,
-                (
-                    f'Issued {issued}'
-                    if issued
-                    else
-                    (
-                        'Issued '
-                        +
-                        item.published.strftime(
-                            '%-I:%M %p UTC'
-                        )
-                        if
-                        item.published
-                        else
-                        ''
-                    )
-                ),
-                *details,
-            ],
+            post_lines,
             item.link,
         ),
         image_path,
@@ -10090,21 +11418,32 @@ def render_nhc_storm(
     item: RSSItem,
     kind: str,
     basin: str,
-) -> RenderedPost:
+) -> Optional[RenderedPost]:
     raw = (
         item.multiline_text
     )
 
+    storm_label = nhc_storm_name(
+        item
+    )
+
+    if not storm_label:
+        log.info(
+            'Ignoring NHC %s item without '
+            'an advisory-bearing cyclone identity: %s',
+            kind,
+            item.title,
+        )
+
+        return None
+
     names = {
         'tcp':
             'Tropical Cyclone Public Advisory',
-
         'tcu':
             'Tropical Cyclone Update',
-
         'tcd':
             'Tropical Cyclone Forecast Discussion',
-
         'tcm':
             'Tropical Cyclone Forecast Advisory',
     }
@@ -10132,9 +11471,16 @@ def render_nhc_storm(
 
     details: list[str] = []
 
-    winds = find_nhc_field(
-        raw,
-        'MAXIMUM SUSTAINED WINDS',
+    winds = (
+        find_nhc_field(
+            raw,
+            'MAXIMUM SUSTAINED WINDS',
+        )
+        or
+        find_nhc_field(
+            raw,
+            'MAX SUSTAINED WINDS',
+        )
     )
 
     movement = find_nhc_field(
@@ -10196,8 +11542,9 @@ def render_nhc_storm(
 
     except Exception:
         log.exception(
-            'Could not build '
-            'derived NHC storm map'
+            'Could not build clean '
+            'NHC storm cone map for %s',
+            storm_label,
         )
 
     if not image_path:
@@ -10211,12 +11558,15 @@ def render_nhc_storm(
         except Exception:
             log.exception(
                 'Could not obtain '
-                'NHC storm image'
+                'official NHC storm image '
+                'for %s',
+                storm_label,
             )
 
     return RenderedPost(
         fit_post(
             [
+                storm_label,
                 product,
                 location,
                 (

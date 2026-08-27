@@ -24,12 +24,12 @@ from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-27-nhc-operational-maps-v8.5'
+BUILD_ID = '2026-08-27-nhc-per-system-bright-v8.6'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -8706,6 +8706,23 @@ class NHCInvestFix:
     lon: float
     lat: float
     valid: datetime
+    movement_direction: str = ''
+    movement_knots: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class NHCOutlookSystem:
+    basin: str
+    invest_id: str
+    system_label: str
+    probability_2: str
+    probability_7: str
+    point_feature: dict[str, Any]
+    region_feature: dict[str, Any]
+    motion_feature: dict[str, Any]
+    source_token: str
+    movement_direction: str = ''
+    movement_knots: Optional[int] = None
 
 
 def nhc_atcf_coordinate(
@@ -8751,11 +8768,120 @@ def nhc_atcf_coordinate(
     return coordinate
 
 
+def nhc_initial_bearing(
+    lon1: float,
+    lat1: float,
+    lon2: float,
+    lat2: float,
+) -> float:
+    lat1_r = math.radians(
+        lat1
+    )
+
+    lat2_r = math.radians(
+        lat2
+    )
+
+    delta_lon = math.radians(
+        lon2
+        -
+        lon1
+    )
+
+    x = (
+        math.sin(
+            delta_lon
+        )
+        *
+        math.cos(
+            lat2_r
+        )
+    )
+
+    y = (
+        math.cos(
+            lat1_r
+        )
+        *
+        math.sin(
+            lat2_r
+        )
+        -
+        math.sin(
+            lat1_r
+        )
+        *
+        math.cos(
+            lat2_r
+        )
+        *
+        math.cos(
+            delta_lon
+        )
+    )
+
+    return (
+        math.degrees(
+            math.atan2(
+                x,
+                y,
+            )
+        )
+        +
+        360.0
+    ) % 360.0
+
+
+def nhc_compass_direction(
+    bearing: float,
+) -> str:
+    names = (
+        'N',
+        'NNE',
+        'NE',
+        'ENE',
+        'E',
+        'ESE',
+        'SE',
+        'SSE',
+        'S',
+        'SSW',
+        'SW',
+        'WSW',
+        'W',
+        'WNW',
+        'NW',
+        'NNW',
+    )
+
+    index = int(
+        round(
+            (
+                bearing
+                %
+                360.0
+            )
+            /
+            22.5
+        )
+    ) % 16
+
+    return names[
+        index
+    ]
+
+
 def nhc_parse_atcf_invest_fix(
     text: str,
     invest_id: str,
 ) -> Optional[NHCInvestFix]:
-    latest: Optional[NHCInvestFix] = None
+    records: list[
+        tuple[
+            datetime,
+            float,
+            float,
+        ]
+    ] = []
 
     for raw_line in text.splitlines():
         fields = [
@@ -8785,6 +8911,7 @@ def nhc_parse_atcf_invest_fix(
             ).replace(
                 tzinfo=timezone.utc
             )
+
         except Exception:
             continue
 
@@ -8803,24 +8930,123 @@ def nhc_parse_atcf_invest_fix(
         ):
             continue
 
-        candidate = NHCInvestFix(
-            invest_id=
-                invest_id,
-            lon=lon,
-            lat=lat,
-            valid=valid,
+        records.append(
+            (
+                valid,
+                lon,
+                lat,
+            )
         )
 
-        if (
-            latest is None
-            or
-            candidate.valid
-            >
-            latest.valid
-        ):
-            latest = candidate
+    if not records:
+        return None
 
-    return latest
+    records.sort(
+        key=lambda record:
+            record[0]
+    )
+
+    latest_valid, latest_lon, latest_lat = (
+        records[-1]
+    )
+
+    movement_direction = ''
+    movement_knots: Optional[int] = None
+
+    previous: Optional[
+        tuple[
+            datetime,
+            float,
+            float,
+        ]
+    ] = None
+
+    for candidate in reversed(
+        records[:-1]
+    ):
+        hours = (
+            latest_valid
+            -
+            candidate[0]
+        ).total_seconds() / 3600.0
+
+        if hours >= 1.0:
+            previous = candidate
+            break
+
+    if previous is not None:
+        hours = (
+            latest_valid
+            -
+            previous[0]
+        ).total_seconds() / 3600.0
+
+        if (
+            hours
+            >
+            0.0
+            and
+            hours
+            <=
+            18.0
+        ):
+            distance_nm = (
+                nhc_distance_km(
+                    previous[1],
+                    previous[2],
+                    latest_lon,
+                    latest_lat,
+                )
+                /
+                1.852
+            )
+
+            speed_knots = (
+                distance_nm
+                /
+                hours
+            )
+
+            if (
+                speed_knots
+                >=
+                0.0
+                and
+                speed_knots
+                <=
+                80.0
+            ):
+                movement_knots = int(
+                    round(
+                        speed_knots
+                    )
+                )
+
+                movement_direction = (
+                    nhc_compass_direction(
+                        nhc_initial_bearing(
+                            previous[1],
+                            previous[2],
+                            latest_lon,
+                            latest_lat,
+                        )
+                    )
+                )
+
+    return NHCInvestFix(
+        invest_id=
+            invest_id,
+        lon=
+            latest_lon,
+        lat=
+            latest_lat,
+        valid=
+            latest_valid,
+        movement_direction=
+            movement_direction,
+        movement_knots=
+            movement_knots,
+    )
 
 
 def nhc_active_atcf_invests(
@@ -8861,10 +9087,12 @@ def nhc_active_atcf_invests(
                 30,
             ),
         )
+
     except Exception:
         log.exception(
             'Could not read NHC ATCF best-track index'
         )
+
         return []
 
     file_pattern = re.compile(
@@ -8921,6 +9149,7 @@ def nhc_active_atcf_invests(
                     30,
                 ),
             ).text
+
         except Exception:
             continue
 
@@ -8970,11 +9199,13 @@ def nhc_gtwo_point_lonlat(
                 'x'
             ]
         )
+
         y = float(
             geometry[
                 'y'
             ]
         )
+
     except Exception:
         return (
             None,
@@ -9027,6 +9258,7 @@ def nhc_distance_km(
     lat1_r = math.radians(
         lat1
     )
+
     lat2_r = math.radians(
         lat2
     )
@@ -9085,25 +9317,25 @@ def nhc_distance_km(
     )
 
 
-def nhc_match_invest_ids_to_outlook(
+def nhc_match_invest_fixes_to_outlook(
     basin: str,
     point_features: list[dict[str, Any]],
-) -> list[str]:
+) -> dict[int, NHCInvestFix]:
     if not point_features:
-        return []
+        return {}
 
     active_invests = nhc_active_atcf_invests(
         basin
     )
 
     if not active_invests:
-        return []
+        return {}
 
     candidates: list[
         tuple[
             float,
-            str,
             int,
+            NHCInvestFix,
         ]
     ] = []
 
@@ -9135,8 +9367,8 @@ def nhc_match_invest_ids_to_outlook(
                 candidates.append(
                     (
                         distance,
-                        invest.invest_id,
                         point_index,
+                        invest,
                     )
                 )
 
@@ -9147,31 +9379,54 @@ def nhc_match_invest_ids_to_outlook(
 
     used_points: set[int] = set()
     used_invests: set[str] = set()
-    matched: list[str] = []
+    matched: dict[
+        int,
+        NHCInvestFix,
+    ] = {}
 
     for (
         _distance,
-        invest_id,
         point_index,
+        invest,
     ) in candidates:
         if (
             point_index in used_points
             or
-            invest_id in used_invests
+            invest.invest_id in used_invests
         ):
             continue
 
         used_points.add(
             point_index
         )
+
         used_invests.add(
-            invest_id
-        )
-        matched.append(
-            invest_id
+            invest.invest_id
         )
 
+        matched[
+            point_index
+        ] = invest
+
     return matched
+
+
+def nhc_match_invest_ids_to_outlook(
+    basin: str,
+    point_features: list[dict[str, Any]],
+) -> list[str]:
+    mapping = nhc_match_invest_fixes_to_outlook(
+        basin,
+        point_features,
+    )
+
+    return [
+        mapping[index].invest_id
+        for index
+        in sorted(
+            mapping
+        )
+    ]
 
 
 def nhc_wind_mph(
@@ -9363,6 +9618,7 @@ def nhc_arcgis_geometry_points(
                     ),
                 )
             )
+
         except Exception:
             pass
 
@@ -9383,7 +9639,10 @@ def nhc_arcgis_geometry_points(
             if (
                 isinstance(
                     part,
-                    (list, tuple),
+                    (
+                        list,
+                        tuple,
+                    ),
                 )
                 and
                 len(
@@ -9394,7 +9653,10 @@ def nhc_arcgis_geometry_points(
                 and
                 isinstance(
                     part[0],
-                    (int, float),
+                    (
+                        int,
+                        float,
+                    ),
                 )
             ):
                 try:
@@ -9408,6 +9670,7 @@ def nhc_arcgis_geometry_points(
                             ),
                         )
                     )
+
                 except Exception:
                     pass
 
@@ -9415,7 +9678,10 @@ def nhc_arcgis_geometry_points(
 
             if not isinstance(
                 part,
-                (list, tuple),
+                (
+                    list,
+                    tuple,
+                ),
             ):
                 continue
 
@@ -9423,7 +9689,10 @@ def nhc_arcgis_geometry_points(
                 if (
                     not isinstance(
                         coordinate,
-                        (list, tuple),
+                        (
+                            list,
+                            tuple,
+                        ),
                     )
                     or
                     len(
@@ -9445,128 +9714,11 @@ def nhc_arcgis_geometry_points(
                             ),
                         )
                     )
+
                 except Exception:
                     pass
 
     return points
-
-
-def nhc_export_summary_overlay(
-    bbox: tuple[
-        float,
-        float,
-        float,
-        float,
-    ],
-    width: int,
-    height: int,
-    layers: Iterable[int],
-    *,
-    layer_where: str = '',
-) -> Image.Image:
-    layer_ids = [
-        int(
-            layer
-        )
-        for layer
-        in layers
-    ]
-
-    params: dict[str, Any] = {
-        'bbox':
-            ','.join(
-                f'{value:.3f}'
-                for value
-                in bbox
-            ),
-        'bboxSR':
-            '3857',
-        'imageSR':
-            '3857',
-        'size':
-            f'{width},{height}',
-        'format':
-            'png32',
-        'transparent':
-            'true',
-        'layers':
-            'show:'
-            +
-            ','.join(
-                str(
-                    layer
-                )
-                for layer
-                in layer_ids
-            ),
-        'f':
-            'image',
-    }
-
-    if layer_where:
-        params[
-            'layerDefs'
-        ] = json.dumps(
-            {
-                str(
-                    layer
-                ):
-                    layer_where
-                for layer
-                in layer_ids
-            },
-            separators=(
-                ',',
-                ':',
-            ),
-        )
-
-    try:
-        response = http_get(
-            f'{NHC_TROPICAL_MAPSERVER}/export',
-            params=params,
-            headers={
-                'Accept':
-                    'image/png,*/*'
-            },
-            timeout=(
-                8,
-                45,
-            ),
-        )
-
-    except requests.HTTPError:
-        if not layer_where:
-            raise
-
-        params.pop(
-            'layerDefs',
-            None,
-        )
-
-        response = http_get(
-            f'{NHC_TROPICAL_MAPSERVER}/export',
-            params=params,
-            headers={
-                'Accept':
-                    'image/png,*/*'
-            },
-            timeout=(
-                8,
-                45,
-            ),
-        )
-
-    return (
-        Image.open(
-            io.BytesIO(
-                response.content
-            )
-        )
-        .convert(
-            'RGBA'
-        )
-    )
 
 
 def nhc_probability_features(
@@ -9574,15 +9726,19 @@ def nhc_probability_features(
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
+    out_fields = (
+        'objectid,basin,prob2day,risk2day,'
+        'prob7day,risk7day,idp_source,'
+        'idp_filedate,idp_ingestdate'
+    )
+
     point_features = arcgis_query_features(
         NHC_TROPICAL_MAPSERVER,
         NHC_TWO_CURRENT_LAYER,
-        out_fields=(
-            'objectid,basin,prob2day,risk2day,'
-            'prob7day,risk7day,idp_source,'
-            'idp_filedate,idp_ingestdate'
-        ),
+        out_fields=
+            out_fields,
         return_geometry=True,
         out_sr=3857,
     )
@@ -9590,38 +9746,25 @@ def nhc_probability_features(
     region_features = arcgis_query_features(
         NHC_TROPICAL_MAPSERVER,
         NHC_TWO_REGION_LAYER,
-        out_fields=(
-            'objectid,basin,prob2day,risk2day,'
-            'prob7day,risk7day,idp_source,'
-            'idp_filedate,idp_ingestdate'
-        ),
+        out_fields=
+            out_fields,
         return_geometry=True,
         out_sr=3857,
     )
 
-    point_features = [
-        feature
-        for feature
-        in point_features
-        if nhc_basin_matches(
-            (
-                feature.get(
-                    'attributes'
-                )
-                or
-                {}
-            ).get(
-                'basin'
-            ),
-            basin,
-        )
-    ]
+    motion_features = arcgis_query_features(
+        NHC_TROPICAL_MAPSERVER,
+        NHC_TWO_MOTION_LAYER,
+        out_fields=
+            out_fields,
+        return_geometry=True,
+        out_sr=3857,
+    )
 
-    region_features = [
-        feature
-        for feature
-        in region_features
-        if nhc_basin_matches(
+    def basin_filter(
+        feature: dict[str, Any],
+    ) -> bool:
+        return nhc_basin_matches(
             (
                 feature.get(
                     'attributes'
@@ -9633,11 +9776,32 @@ def nhc_probability_features(
             ),
             basin,
         )
-    ]
 
     return (
-        point_features,
-        region_features,
+        [
+            feature
+            for feature
+            in point_features
+            if basin_filter(
+                feature
+            )
+        ],
+        [
+            feature
+            for feature
+            in region_features
+            if basin_filter(
+                feature
+            )
+        ],
+        [
+            feature
+            for feature
+            in motion_features
+            if basin_filter(
+                feature
+            )
+        ],
     )
 
 
@@ -9710,14 +9874,1170 @@ def nhc_point_pixel_from_mercator(
     )
 
 
-def nhc_draw_probability_labels(
-    image: Image.Image,
+def nhc_feature_source_token(
+    feature: dict[str, Any],
+) -> str:
+    attrs = (
+        feature.get(
+            'attributes'
+        )
+        or
+        {}
+    )
+
+    return squish(
+        str(
+            attrs.get(
+                'idp_source'
+            )
+            or
+            ''
+        )
+    ).upper()
+
+
+def nhc_probability_text(
+    value: Any,
+) -> str:
+    text = squish(
+        str(
+            value
+            or
+            ''
+        )
+    )
+
+    if not text:
+        return ''
+
+    match = re.search(
+        r'(\d{1,3})',
+        text,
+    )
+
+    if not match:
+        return text
+
+    return (
+        f'{int(match.group(1))}%'
+    )
+
+
+def nhc_probability_number(
+    value: Any,
+) -> Optional[int]:
+    text = nhc_probability_text(
+        value
+    )
+
+    match = re.search(
+        r'(\d{1,3})',
+        text,
+    )
+
+    if not match:
+        return None
+
+    return int(
+        match.group(
+            1
+        )
+    )
+
+
+def nhc_outlook_color(
+    probability_7: Any,
+    probability_2: Any = '',
+) -> tuple[
+    int,
+    int,
+    int,
+    int,
+]:
+    value = (
+        nhc_probability_number(
+            probability_7
+        )
+    )
+
+    if value is None:
+        value = (
+            nhc_probability_number(
+                probability_2
+            )
+        )
+
+    if value is None:
+        value = 10
+
+    if value >= 70:
+        return (
+            238,
+            28,
+            36,
+            255,
+        )
+
+    if value >= 40:
+        return (
+            255,
+            145,
+            0,
+            255,
+        )
+
+    return (
+        255,
+        218,
+        0,
+        255,
+    )
+
+
+def nhc_geometry_center_mercator(
+    feature: dict[str, Any],
+) -> Optional[
+    tuple[
+        float,
+        float,
+    ]
+]:
+    points = nhc_arcgis_geometry_points(
+        feature.get(
+            'geometry'
+        )
+        or
+        {}
+    )
+
+    if not points:
+        return None
+
+    return (
+        sum(
+            point[0]
+            for point
+            in points
+        )
+        /
+        len(
+            points
+        ),
+        sum(
+            point[1]
+            for point
+            in points
+        )
+        /
+        len(
+            points
+        ),
+    )
+
+
+def nhc_geometry_distance_to_point(
+    feature: dict[str, Any],
+    point_x: float,
+    point_y: float,
+) -> float:
+    points = nhc_arcgis_geometry_points(
+        feature.get(
+            'geometry'
+        )
+        or
+        {}
+    )
+
+    if not points:
+        return float(
+            'inf'
+        )
+
+    return min(
+        math.hypot(
+            x
+            -
+            point_x,
+            y
+            -
+            point_y,
+        )
+        for x, y
+        in points
+    )
+
+
+def nhc_related_outlook_feature(
+    point_feature: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not candidates:
+        return {}
+
+    point_geometry = (
+        point_feature.get(
+            'geometry'
+        )
+        or
+        {}
+    )
+
+    try:
+        point_x = float(
+            point_geometry[
+                'x'
+            ]
+        )
+
+        point_y = float(
+            point_geometry[
+                'y'
+            ]
+        )
+
+    except Exception:
+        return {}
+
+    point_attrs = (
+        point_feature.get(
+            'attributes'
+        )
+        or
+        {}
+    )
+
+    point_source = (
+        nhc_feature_source_token(
+            point_feature
+        )
+    )
+
+    point_prob2 = nhc_probability_text(
+        point_attrs.get(
+            'prob2day'
+        )
+    )
+
+    point_prob7 = nhc_probability_text(
+        point_attrs.get(
+            'prob7day'
+        )
+    )
+
+    point_filedate = str(
+        point_attrs.get(
+            'idp_filedate'
+        )
+        or
+        ''
+    )
+
+    ranked: list[
+        tuple[
+            int,
+            float,
+            dict[str, Any],
+        ]
+    ] = []
+
+    for candidate in candidates:
+        attrs = (
+            candidate.get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        score = 0
+
+        candidate_source = (
+            nhc_feature_source_token(
+                candidate
+            )
+        )
+
+        if (
+            point_source
+            and
+            candidate_source
+            and
+            point_source
+            ==
+            candidate_source
+        ):
+            score += 1000
+
+        candidate_prob2 = (
+            nhc_probability_text(
+                attrs.get(
+                    'prob2day'
+                )
+            )
+        )
+
+        candidate_prob7 = (
+            nhc_probability_text(
+                attrs.get(
+                    'prob7day'
+                )
+            )
+        )
+
+        if (
+            point_prob2
+            and
+            candidate_prob2
+            ==
+            point_prob2
+        ):
+            score += 100
+
+        if (
+            point_prob7
+            and
+            candidate_prob7
+            ==
+            point_prob7
+        ):
+            score += 150
+
+        candidate_filedate = str(
+            attrs.get(
+                'idp_filedate'
+            )
+            or
+            ''
+        )
+
+        if (
+            point_filedate
+            and
+            candidate_filedate
+            ==
+            point_filedate
+        ):
+            score += 50
+
+        distance = (
+            nhc_geometry_distance_to_point(
+                candidate,
+                point_x,
+                point_y,
+            )
+        )
+
+        ranked.append(
+            (
+                -score,
+                distance,
+                candidate,
+            )
+        )
+
+    ranked.sort(
+        key=lambda item:
+            (
+                item[0],
+                item[1],
+            )
+    )
+
+    return ranked[0][2]
+
+
+def nhc_assign_related_outlook_features(
     point_features: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> dict[
+    int,
+    dict[str, Any],
+]:
+    if (
+        not point_features
+        or
+        not candidates
+    ):
+        return {}
+
+    ranked_pairs: list[
+        tuple[
+            int,
+            float,
+            int,
+            int,
+        ]
+    ] = []
+
+    for point_index, point_feature in enumerate(
+        point_features
+    ):
+        point_geometry = (
+            point_feature.get(
+                'geometry'
+            )
+            or
+            {}
+        )
+
+        try:
+            point_x = float(
+                point_geometry[
+                    'x'
+                ]
+            )
+
+            point_y = float(
+                point_geometry[
+                    'y'
+                ]
+            )
+
+        except Exception:
+            continue
+
+        point_attrs = (
+            point_feature.get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        point_source = (
+            nhc_feature_source_token(
+                point_feature
+            )
+        )
+
+        point_prob2 = nhc_probability_text(
+            point_attrs.get(
+                'prob2day'
+            )
+        )
+
+        point_prob7 = nhc_probability_text(
+            point_attrs.get(
+                'prob7day'
+            )
+        )
+
+        point_filedate = str(
+            point_attrs.get(
+                'idp_filedate'
+            )
+            or
+            ''
+        )
+
+        for candidate_index, candidate in enumerate(
+            candidates
+        ):
+            attrs = (
+                candidate.get(
+                    'attributes'
+                )
+                or
+                {}
+            )
+
+            score = 0
+
+            candidate_source = (
+                nhc_feature_source_token(
+                    candidate
+                )
+            )
+
+            if (
+                point_source
+                and
+                candidate_source
+                and
+                point_source
+                ==
+                candidate_source
+            ):
+                score += 1000
+
+            candidate_prob2 = (
+                nhc_probability_text(
+                    attrs.get(
+                        'prob2day'
+                    )
+                )
+            )
+
+            candidate_prob7 = (
+                nhc_probability_text(
+                    attrs.get(
+                        'prob7day'
+                    )
+                )
+            )
+
+            if (
+                point_prob2
+                and
+                candidate_prob2
+                ==
+                point_prob2
+            ):
+                score += 100
+
+            if (
+                point_prob7
+                and
+                candidate_prob7
+                ==
+                point_prob7
+            ):
+                score += 150
+
+            candidate_filedate = str(
+                attrs.get(
+                    'idp_filedate'
+                )
+                or
+                ''
+            )
+
+            if (
+                point_filedate
+                and
+                candidate_filedate
+                ==
+                point_filedate
+            ):
+                score += 50
+
+            distance = (
+                nhc_geometry_distance_to_point(
+                    candidate,
+                    point_x,
+                    point_y,
+                )
+            )
+
+            ranked_pairs.append(
+                (
+                    -score,
+                    distance,
+                    point_index,
+                    candidate_index,
+                )
+            )
+
+    ranked_pairs.sort(
+        key=lambda pair:
+            (
+                pair[0],
+                pair[1],
+            )
+    )
+
+    used_points: set[int] = set()
+    used_candidates: set[int] = set()
+    result: dict[
+        int,
+        dict[str, Any],
+    ] = {}
+
+    for (
+        _negative_score,
+        _distance,
+        point_index,
+        candidate_index,
+    ) in ranked_pairs:
+        if (
+            point_index in used_points
+            or
+            candidate_index in used_candidates
+        ):
+            continue
+
+        used_points.add(
+            point_index
+        )
+
+        used_candidates.add(
+            candidate_index
+        )
+
+        result[
+            point_index
+        ] = candidates[
+            candidate_index
+        ]
+
+    return result
+
+
+def nhc_outlook_systems(
+    basin: str,
+    raw: str = '',
+) -> list[NHCOutlookSystem]:
+    (
+        point_features,
+        region_features,
+        motion_features,
+    ) = nhc_probability_features(
+        basin
+    )
+
+    if not point_features:
+        return []
+
+    invest_fixes = (
+        nhc_match_invest_fixes_to_outlook(
+            basin,
+            point_features,
+        )
+    )
+
+    region_mapping = (
+        nhc_assign_related_outlook_features(
+            point_features,
+            region_features,
+        )
+    )
+
+    motion_mapping = (
+        nhc_assign_related_outlook_features(
+            point_features,
+            motion_features,
+        )
+    )
+
+    explicit_invests = nhc_invest_ids(
+        raw
+    )
+
+    systems: list[
+        NHCOutlookSystem
+    ] = []
+
+    for index, point_feature in enumerate(
+        point_features
+    ):
+        attrs = (
+            point_feature.get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        region_feature = (
+            region_mapping.get(
+                index,
+                {},
+            )
+        )
+
+        motion_feature = (
+            motion_mapping.get(
+                index,
+                {},
+            )
+        )
+
+        fix = invest_fixes.get(
+            index
+        )
+
+        invest_id = (
+            fix.invest_id
+            if fix
+            else
+            ''
+        )
+
+        if (
+            not invest_id
+            and
+            len(
+                explicit_invests
+            )
+            ==
+            1
+            and
+            len(
+                point_features
+            )
+            ==
+            1
+        ):
+            invest_id = (
+                explicit_invests[0]
+            )
+
+        probability_2 = (
+            nhc_probability_text(
+                attrs.get(
+                    'prob2day'
+                )
+            )
+        )
+
+        probability_7 = (
+            nhc_probability_text(
+                attrs.get(
+                    'prob7day'
+                )
+            )
+        )
+
+        source_token = (
+            nhc_feature_source_token(
+                point_feature
+            )
+            or
+            f'{basin}:{index}'
+        )
+
+        system_label = (
+            f'Invest {invest_id}'
+            if invest_id
+            else
+            (
+                'Tropical Disturbance'
+                if len(
+                    point_features
+                )
+                ==
+                1
+                else
+                f'Tropical Disturbance {index + 1}'
+            )
+        )
+
+        systems.append(
+            NHCOutlookSystem(
+                basin=
+                    basin,
+                invest_id=
+                    invest_id,
+                system_label=
+                    system_label,
+                probability_2=
+                    probability_2,
+                probability_7=
+                    probability_7,
+                point_feature=
+                    point_feature,
+                region_feature=
+                    region_feature,
+                motion_feature=
+                    motion_feature,
+                source_token=
+                    source_token,
+                movement_direction=(
+                    fix.movement_direction
+                    if fix
+                    else
+                    ''
+                ),
+                movement_knots=(
+                    fix.movement_knots
+                    if fix
+                    else
+                    None
+                ),
+            )
+        )
+
+    systems.sort(
+        key=lambda system:
+            (
+                system.invest_id
+                or
+                system.source_token
+            )
+    )
+
+    return systems
+
+
+def nhc_brighten_mapbox_base(
+    image: Image.Image,
+) -> Image.Image:
+    rgb = image.convert(
+        'RGB'
+    )
+
+    rgb = (
+        ImageEnhance.Contrast(
+            rgb
+        )
+        .enhance(
+            1.14
+        )
+    )
+
+    rgb = (
+        ImageEnhance.Color(
+            rgb
+        )
+        .enhance(
+            1.08
+        )
+    )
+
+    rgb = (
+        ImageEnhance.Brightness(
+            rgb
+        )
+        .enhance(
+            1.035
+        )
+    )
+
+    return rgb.convert(
+        'RGBA'
+    )
+
+
+def nhc_draw_hatched_region(
+    image: Image.Image,
+    geometry: dict[str, Any],
     bbox: tuple[
         float,
         float,
         float,
         float,
+    ],
+    color: tuple[
+        int,
+        int,
+        int,
+        int,
+    ],
+) -> Image.Image:
+    out = image.copy().convert(
+        'RGBA'
+    )
+
+    width, height = out.size
+
+    rings = arcgis_geometry_rings_mercator(
+        geometry,
+        default_wkid=3857,
+    )
+
+    if not rings:
+        return out
+
+    mask = Image.new(
+        'L',
+        (
+            width,
+            height,
+        ),
+        0,
+    )
+
+    mask_draw = ImageDraw.Draw(
+        mask
+    )
+
+    pixel_rings: list[
+        list[
+            tuple[
+                int,
+                int,
+            ]
+        ]
+    ] = []
+
+    for ring in rings:
+        pixels = mercator_ring_to_pixels(
+            ring,
+            bbox,
+            width,
+            height,
+        )
+
+        if len(
+            pixels
+        ) < 3:
+            continue
+
+        pixel_rings.append(
+            pixels
+        )
+
+        mask_draw.polygon(
+            pixels,
+            fill=255,
+        )
+
+    if not pixel_rings:
+        return out
+
+    fill_layer = Image.new(
+        'RGBA',
+        (
+            width,
+            height,
+        ),
+        (
+            color[0],
+            color[1],
+            color[2],
+            38,
+        ),
+    )
+
+    transparent = Image.new(
+        'RGBA',
+        (
+            width,
+            height,
+        ),
+        (
+            0,
+            0,
+            0,
+            0,
+        ),
+    )
+
+    out.alpha_composite(
+        Image.composite(
+            fill_layer,
+            transparent,
+            mask,
+        )
+    )
+
+    hatch_layer = Image.new(
+        'RGBA',
+        (
+            width,
+            height,
+        ),
+        (
+            0,
+            0,
+            0,
+            0,
+        ),
+    )
+
+    hatch_draw = ImageDraw.Draw(
+        hatch_layer,
+        'RGBA',
+    )
+
+    spacing = 13
+
+    for offset in range(
+        -height,
+        width
+        +
+        height,
+        spacing,
+    ):
+        hatch_draw.line(
+            (
+                offset,
+                height,
+                offset
+                +
+                height,
+                0,
+            ),
+            fill=(
+                color[0],
+                color[1],
+                color[2],
+                128,
+            ),
+            width=2,
+        )
+
+    out.alpha_composite(
+        Image.composite(
+            hatch_layer,
+            transparent,
+            mask,
+        )
+    )
+
+    draw = ImageDraw.Draw(
+        out,
+        'RGBA',
+    )
+
+    for pixels in pixel_rings:
+        closed = (
+            pixels
+            +
+            [
+                pixels[0]
+            ]
+        )
+
+        draw.line(
+            closed,
+            fill=(
+                255,
+                255,
+                255,
+                235,
+            ),
+            width=10,
+            joint='curve',
+        )
+
+        draw.line(
+            closed,
+            fill=(
+                color[0],
+                color[1],
+                color[2],
+                255,
+            ),
+            width=7,
+            joint='curve',
+        )
+
+    return out
+
+
+def nhc_draw_invest_marker(
+    image: Image.Image,
+    feature: dict[str, Any],
+    bbox: tuple[
+        float,
+        float,
+        float,
+        float,
+    ],
+    color: tuple[
+        int,
+        int,
+        int,
+        int,
+    ],
+) -> Image.Image:
+    out = image.copy().convert(
+        'RGBA'
+    )
+
+    geometry = (
+        feature.get(
+            'geometry'
+        )
+        or
+        {}
+    )
+
+    try:
+        x = float(
+            geometry[
+                'x'
+            ]
+        )
+
+        y = float(
+            geometry[
+                'y'
+            ]
+        )
+
+    except Exception:
+        return out
+
+    px, py = nhc_point_pixel_from_mercator(
+        x,
+        y,
+        bbox,
+        out.width,
+        out.height,
+    )
+
+    draw = ImageDraw.Draw(
+        out,
+        'RGBA',
+    )
+
+    radius = 13
+
+    for width_value, line_color in (
+        (
+            12,
+            (
+                255,
+                255,
+                255,
+                245,
+            ),
+        ),
+        (
+            7,
+            (
+                color[0],
+                color[1],
+                color[2],
+                255,
+            ),
+        ),
+    ):
+        draw.line(
+            (
+                px
+                -
+                radius,
+                py
+                -
+                radius,
+                px
+                +
+                radius,
+                py
+                +
+                radius,
+            ),
+            fill=
+                line_color,
+            width=
+                width_value,
+        )
+
+        draw.line(
+            (
+                px
+                -
+                radius,
+                py
+                +
+                radius,
+                px
+                +
+                radius,
+                py
+                -
+                radius,
+            ),
+            fill=
+                line_color,
+            width=
+                width_value,
+        )
+
+    return out
+
+
+def nhc_draw_invest_info_box(
+    image: Image.Image,
+    system: NHCOutlookSystem,
+    color: tuple[
+        int,
+        int,
+        int,
+        int,
     ],
 ) -> Image.Image:
     out = image.copy().convert(
@@ -9729,210 +11049,257 @@ def nhc_draw_probability_labels(
         'RGBA',
     )
 
-    font = load_font(
-        22,
+    title_font = load_font(
+        24,
         True,
     )
 
-    width, height = out.size
+    text_font = load_font(
+        21,
+        False,
+    )
 
-    for index, feature in enumerate(
-        point_features
+    lines = [
+        (
+            f'2-day development = '
+            f'{system.probability_2 or "N/A"}'
+        ),
+        (
+            f'7-day development = '
+            f'{system.probability_7 or "N/A"}'
+        ),
+    ]
+
+    if (
+        system.movement_direction
+        and
+        system.movement_knots
+        is not None
     ):
-        geometry = (
-            feature.get(
-                'geometry'
-            )
-            or
-            {}
+        lines.append(
+            f'Movement '
+            f'{system.movement_direction} '
+            f'{system.movement_knots} kt'
         )
 
-        try:
-            x = float(
-                geometry[
-                    'x'
-                ]
-            )
+    box_width = 350
+    line_height = 30
 
-            y = float(
-                geometry[
-                    'y'
-                ]
-            )
-
-        except Exception:
-            continue
-
-        attrs = (
-            feature.get(
-                'attributes'
-            )
-            or
-            {}
+    box_height = (
+        52
+        +
+        line_height
+        *
+        len(
+            lines
         )
+        +
+        14
+    )
 
-        probability_2 = squish(
-            str(
-                attrs.get(
-                    'prob2day'
-                )
-                or
-                ''
-            )
-        )
+    margin = 22
 
-        probability_7 = squish(
-            str(
-                attrs.get(
-                    'prob7day'
-                )
-                or
-                ''
-            )
-        )
+    left = (
+        out.width
+        -
+        box_width
+        -
+        margin
+    )
 
-        if not any(
+    top = (
+        out.height
+        -
+        box_height
+        -
+        margin
+    )
+
+    right = (
+        out.width
+        -
+        margin
+    )
+
+    bottom = (
+        out.height
+        -
+        margin
+    )
+
+    draw.rounded_rectangle(
+        (
+            left,
+            top,
+            right,
+            bottom,
+        ),
+        radius=18,
+        fill=(
+            255,
+            255,
+            255,
+            246,
+        ),
+        outline=(
+            color[0],
+            color[1],
+            color[2],
+            255,
+        ),
+        width=4,
+    )
+
+    title_box = draw.textbbox(
+        (
+            0,
+            0,
+        ),
+        system.system_label,
+        font=title_font,
+    )
+
+    title_width = (
+        title_box[2]
+        -
+        title_box[0]
+    )
+
+    draw.text(
+        (
+            left
+            +
             (
-                probability_2,
-                probability_7,
+                box_width
+                -
+                title_width
             )
-        ):
-            continue
+            /
+            2,
+            top
+            +
+            12,
+        ),
+        system.system_label,
+        font=title_font,
+        fill=(
+            12,
+            16,
+            22,
+            255,
+        ),
+    )
 
-        if (
-            probability_2
-            and
-            probability_7
-        ):
-            label = (
-                f'2d {probability_2}  '
-                f'7d {probability_7}'
-            )
+    y = (
+        top
+        +
+        48
+    )
 
-        elif probability_7:
-            label = (
-                f'7d {probability_7}'
-            )
-
-        else:
-            label = (
-                f'2d {probability_2}'
-            )
-
-        px, py = (
-            nhc_point_pixel_from_mercator(
-                x,
-                y,
-                bbox,
-                width,
-                height,
-            )
-        )
-
-        text_box = draw.textbbox(
+    for line in lines:
+        line_box = draw.textbbox(
             (
                 0,
                 0,
             ),
-            label,
-            font=font,
-            stroke_width=2,
+            line,
+            font=text_font,
         )
 
-        text_width = (
-            text_box[2]
+        line_width = (
+            line_box[2]
             -
-            text_box[0]
-        )
-
-        text_height = (
-            text_box[3]
-            -
-            text_box[1]
-        )
-
-        label_x = min(
-            max(
-                8,
-                px + 18,
-            ),
-            width
-            -
-            text_width
-            -
-            10,
-        )
-
-        vertical_offset = (
-            -26
-            if
-            index % 2 == 0
-            else
-            12
-        )
-
-        label_y = min(
-            max(
-                8,
-                py
-                +
-                vertical_offset,
-            ),
-            height
-            -
-            text_height
-            -
-            8,
+            line_box[0]
         )
 
         draw.text(
             (
-                label_x,
-                label_y,
+                left
+                +
+                (
+                    box_width
+                    -
+                    line_width
+                )
+                /
+                2,
+                y,
             ),
-            label,
-            font=font,
+            line,
+            font=text_font,
             fill=(
+                12,
                 16,
                 22,
-                29,
                 255,
-            ),
-            stroke_width=3,
-            stroke_fill=(
-                255,
-                255,
-                255,
-                245,
             ),
         )
+
+        y += line_height
 
     return out
 
 
 def build_mapbox_nhc_invest_map(
-    basin: str,
+    system: NHCOutlookSystem,
 ) -> str:
-    width = 1200
-    height = 760
-
-    point_features, region_features = (
-        nhc_probability_features(
-            basin
-        )
-    )
-
     if (
-        not point_features
-        and
-        not region_features
+        not system.point_feature
+        or
+        not system.region_feature
     ):
         return ''
 
-    bbox = mercator_bbox_from_lonlat(
-        *nhc_two_basin_extent(
-            basin
+    width = 1200
+    height = 760
+
+    map_points = (
+        nhc_arcgis_geometry_points(
+            system.region_feature.get(
+                'geometry'
+            )
+            or
+            {}
         )
+    )
+
+    point_geometry = (
+        system.point_feature.get(
+            'geometry'
+        )
+        or
+        {}
+    )
+
+    try:
+        map_points.append(
+            (
+                float(
+                    point_geometry[
+                        'x'
+                    ]
+                ),
+                float(
+                    point_geometry[
+                        'y'
+                    ]
+                ),
+            )
+        )
+
+    except Exception:
+        return ''
+
+    if not map_points:
+        return ''
+
+    bbox = mercator_bbox_from_points(
+        map_points,
+        width,
+        height,
+        padding_factor=1.75,
+        min_width_m=4700000.0,
+        min_height_m=2750000.0,
     )
 
     base = fetch_mapbox_light_base(
@@ -9941,63 +11308,57 @@ def build_mapbox_nhc_invest_map(
         height,
     )
 
-    exact_basin_value = first_nonempty(
-        (
-            (
-                feature.get(
-                    'attributes'
-                )
-                or
-                {}
-            ).get(
-                'basin'
-            )
-            for feature
-            in (
-                point_features
-                +
-                region_features
-            )
-        )
+    base = nhc_brighten_mapbox_base(
+        base
     )
 
-    layer_where = (
-        'basin = '
-        +
-        sql_quote(
-            exact_basin_value
-        )
-        if
-        exact_basin_value
-        else
-        ''
+    color = nhc_outlook_color(
+        system.probability_7,
+        system.probability_2,
     )
 
-    overlay = nhc_export_summary_overlay(
-        bbox,
-        width,
-        height,
-        (
-            NHC_TWO_CURRENT_LAYER,
-            NHC_TWO_REGION_LAYER,
-        ),
-        layer_where=
-            layer_where,
-    )
-
-    base.alpha_composite(
-        overlay
-    )
-
-    base = nhc_draw_probability_labels(
+    base = nhc_draw_hatched_region(
         base,
-        point_features,
+        system.region_feature.get(
+            'geometry'
+        )
+        or
+        {},
         bbox,
+        color,
+    )
+
+    base = nhc_draw_invest_marker(
+        base,
+        system.point_feature,
+        bbox,
+        color,
+    )
+
+    base = nhc_draw_invest_info_box(
+        base,
+        system,
+        color,
+    )
+
+    safe_id = re.sub(
+        r'[^A-Za-z0-9]+',
+        '_',
+        (
+            system.invest_id
+            or
+            system.source_token
+            or
+            'disturbance'
+        ),
+    ).strip(
+        '_'
     )
 
     return save_map_image(
         base,
-        prefix='nhc_invest_',
+        prefix=
+            f'nhc_invest_{safe_id}_',
     )
 
 
@@ -10511,11 +11872,8 @@ def nhc_draw_named_wind_labels(
             tau == 0
             or
             tau in {
-                12,
                 24,
-                36,
                 48,
-                60,
                 72,
                 96,
                 120,
@@ -10962,6 +12320,10 @@ def build_mapbox_nhc_storm_map(
         height,
     )
 
+    base = nhc_brighten_mapbox_base(
+        base
+    )
+
     overlay = nhc_export_summary_overlay(
         bbox,
         width,
@@ -11196,222 +12558,383 @@ def nhc_probability_values(
     return values
 
 
-def render_nhc_two(
+def nhc_outlook_system_matches_rss(
     item: RSSItem,
-    source: str,
-) -> RenderedPost:
-    basin_key = (
-        'atlantic'
-        if
-        source.endswith(
-            'atlantic'
-        )
-        else
-        'epac'
-        if
-        source.endswith(
-            'epac'
-        )
-        else
-        'cpac'
+    system: NHCOutlookSystem,
+) -> bool:
+    raw = (
+        item.multiline_text
     )
 
+    raw_2 = nhc_probability_values(
+        raw,
+        '2',
+    )
+
+    raw_7 = nhc_probability_values(
+        raw,
+        '7',
+    )
+
+    system_2 = nhc_probability_number(
+        system.probability_2
+    )
+
+    system_7 = nhc_probability_number(
+        system.probability_7
+    )
+
+    if (
+        raw_2
+        and
+        system_2 is not None
+        and
+        system_2 not in raw_2
+    ):
+        return False
+
+    if (
+        raw_7
+        and
+        system_7 is not None
+        and
+        system_7 not in raw_7
+    ):
+        return False
+
+    if item.published is None:
+        return True
+
+    attrs = (
+        system.point_feature.get(
+            'attributes'
+        )
+        or
+        {}
+    )
+
+    gis_time = arcgis_datetime(
+        attrs.get(
+            'idp_filedate'
+        )
+        or
+        attrs.get(
+            'idp_ingestdate'
+        )
+    )
+
+    if gis_time is None:
+        return True
+
+    return (
+        gis_time
+        >=
+        item.published
+        -
+        timedelta(
+            minutes=45
+        )
+    )
+
+
+def render_nhc_two_system(
+    item: RSSItem,
+    source: str,
+    system: NHCOutlookSystem,
+) -> RenderedPost:
     basin = NHC_BASIN_LABELS[
-        basin_key
+        system.basin
     ]
 
     raw = (
         item.multiline_text
     )
 
-    issued = (
-        find_local_issue_clock(
-            raw
-        )
-    )
-
-    probabilities_48 = (
-        nhc_probability_values(
-            raw,
-            '2',
-        )
-    )
-
-    probabilities_7 = (
-        nhc_probability_values(
-            raw,
-            '7',
-        )
-    )
-
-    invests = nhc_invest_ids(
+    issued = find_local_issue_clock(
         raw
     )
 
-    try:
-        point_features, _region_features = (
-            nhc_probability_features(
-                basin_key
-            )
-        )
+    image_path = build_mapbox_nhc_invest_map(
+        system
+    )
 
-        for invest_id in nhc_match_invest_ids_to_outlook(
-            basin_key,
-            point_features,
-        ):
-            if invest_id not in invests:
-                invests.append(
-                    invest_id
-                )
-
-    except Exception:
-        log.exception(
-            'Could not resolve NHC outlook disturbances to ATCF invest identifiers'
+    if not image_path:
+        raise RetryableSourceDataError(
+            f'Could not render a complete '
+            f'NHC map for '
+            f'{system.system_label}'
         )
 
     details: list[str] = []
 
-    if probabilities_48:
+    if system.probability_2:
         details.append(
-            'Highest 2-day formation '
-            'chance: '
-            f'{max(probabilities_48)}%'
+            '2-day formation chance: '
+            f'{system.probability_2}'
         )
 
-    if probabilities_7:
+    if system.probability_7:
         details.append(
-            'Highest 7-day formation '
-            'chance: '
-            f'{max(probabilities_7)}%'
+            '7-day formation chance: '
+            f'{system.probability_7}'
         )
-
-    image_path = ''
-
-    try:
-        image_path = (
-            build_mapbox_nhc_invest_map(
-                basin_key
-            )
-        )
-
-    except Exception:
-        log.exception(
-            'Could not build clean '
-            'NHC tropical outlook map '
-            'for %s',
-            source,
-        )
-
-    if not image_path:
-        image_url = (
-            NHC_TWO_IMAGES.get(
-                source,
-                '',
-            )
-        )
-
-        if image_url:
-            try:
-                image_path = (
-                    download_nhc_image_to_temp(
-                        image_url,
-                        prefix='nhc_two_',
-                        referer=(
-                            item.link
-                            or
-                            'https://www.nhc.noaa.gov/'
-                        ),
-                    )
-                )
-
-            except Exception:
-                log.exception(
-                    'Could not download '
-                    'fallback NHC graphical '
-                    'outlook image for %s',
-                    source,
-                )
 
     if (
-        not image_path
+        system.movement_direction
         and
-        item.link
+        system.movement_knots
+        is not None
     ):
-        try:
-            image_path = (
-                nhc_page_image(
-                    item.link
-                )
-            )
-
-        except Exception:
-            log.exception(
-                'Could not obtain '
-                'fallback NHC outlook '
-                'image for %s',
-                source,
-            )
-
-    if len(
-        invests
-    ) == 1:
-        first_line = (
-            f'Invest {invests[0]}'
+        details.append(
+            f'Movement: '
+            f'{system.movement_direction} '
+            f'at {system.movement_knots} kt'
         )
-
-    elif invests:
-        first_line = (
-            'Invests '
-            +
-            ', '.join(
-                invests
-            )
-        )
-
-    else:
-        first_line = (
-            'Tropical Weather Outlook'
-        )
-
-    post_lines = [
-        first_line,
-    ]
-
-    if first_line != 'Tropical Weather Outlook':
-        post_lines.append(
-            'Tropical Weather Outlook'
-        )
-
-    post_lines.extend(
-        [
-            basin,
-            (
-                f'Issued {issued}'
-                if issued
-                else
-                (
-                    'Issued '
-                    +
-                    item.published.strftime(
-                        '%-I:%M %p UTC'
-                    )
-                    if
-                    item.published
-                    else
-                    ''
-                )
-            ),
-            *details,
-        ]
-    )
 
     return RenderedPost(
         fit_post(
-            post_lines,
+            [
+                system.system_label,
+                'Tropical Weather Outlook',
+                basin,
+                (
+                    f'Issued {issued}'
+                    if issued
+                    else
+                    (
+                        'Issued '
+                        +
+                        item.published.strftime(
+                            '%-I:%M %p UTC'
+                        )
+                        if
+                        item.published
+                        else
+                        ''
+                    )
+                ),
+                *details,
+            ],
             item.link,
         ),
         image_path,
     )
+
+
+def nhc_outlook_system_key(
+    item: RSSItem,
+    system: NHCOutlookSystem,
+) -> str:
+    point_geometry = (
+        system.point_feature.get(
+            'geometry'
+        )
+        or
+        {}
+    )
+
+    region_geometry = (
+        system.region_feature.get(
+            'geometry'
+        )
+        or
+        {}
+    )
+
+    identity = (
+        system.invest_id
+        or
+        system.source_token
+        or
+        system.system_label
+    )
+
+    return sha256_text(
+        '\x1f'.join(
+            [
+                item.key,
+                identity,
+                system.probability_2,
+                system.probability_7,
+                json.dumps(
+                    point_geometry,
+                    sort_keys=True,
+                    separators=(
+                        ',',
+                        ':',
+                    ),
+                ),
+                sha256_text(
+                    json.dumps(
+                        region_geometry,
+                        sort_keys=True,
+                        separators=(
+                            ',',
+                            ':',
+                        ),
+                    )
+                ),
+            ]
+        )
+    )
+
+
+def poll_nhc_two_source(
+    db: StateDB,
+    x: XPublisher,
+    source: str,
+    url: str,
+) -> None:
+    accepted = [
+        item
+        for item
+        in fetch_rss(
+            url
+        )
+        if nhc_item_is_real(
+            item
+        )
+    ]
+
+    state_source = (
+        f'{source}:individual_systems_v86'
+    )
+
+    prepared: list[
+        tuple[
+            RSSItem,
+            NHCOutlookSystem,
+            str,
+        ]
+    ] = []
+
+    basin_key = (
+        'atlantic'
+        if source.endswith(
+            'atlantic'
+        )
+        else
+        'epac'
+        if source.endswith(
+            'epac'
+        )
+        else
+        'cpac'
+    )
+
+    for item in accepted:
+        systems = nhc_outlook_systems(
+            basin_key,
+            item.multiline_text,
+        )
+
+        for system in systems:
+            if not nhc_outlook_system_matches_rss(
+                item,
+                system,
+            ):
+                log.info(
+                    'Waiting for NHC GIS to '
+                    'match the latest %s '
+                    'outlook for %s',
+                    basin_key,
+                    system.system_label,
+                )
+
+                continue
+
+            key = nhc_outlook_system_key(
+                item,
+                system,
+            )
+
+            prepared.append(
+                (
+                    item,
+                    system,
+                    key,
+                )
+            )
+
+    if not db.source_primed(
+        state_source
+    ):
+        for (
+            _item,
+            _system,
+            key,
+        ) in prepared:
+            db.mark_seen_without_post(
+                state_source,
+                key,
+            )
+
+        db.mark_source_primed(
+            state_source
+        )
+
+        log.info(
+            'Primed %s with %d '
+            'current individual NHC '
+            'disturbance(s)',
+            state_source,
+            len(
+                prepared
+            ),
+        )
+
+        return
+
+    for (
+        item,
+        system,
+        key,
+    ) in prepared:
+        current_status = db.status(
+            state_source,
+            key,
+        )
+
+        if (
+            current_status
+            and
+            current_status
+            !=
+            'rejected'
+        ):
+            continue
+
+        post: Optional[
+            RenderedPost
+        ] = None
+
+        try:
+            post = render_nhc_two_system(
+                item,
+                source,
+                system,
+            )
+
+            publish_once(
+                db,
+                x,
+                state_source,
+                key,
+                post,
+            )
+
+        except RetryableSourceDataError as exc:
+            log.info(
+                'Deferred %s %s: %s',
+                state_source,
+                system.system_label,
+                exc,
+            )
+
+        finally:
+            cleanup_post(
+                post
+            )
 
 
 def render_nhc_storm(
@@ -11699,19 +13222,11 @@ def poll_nhc(
         NHC_TWO_FEEDS.items()
     ):
         try:
-            process_rss_source(
+            poll_nhc_two_source(
                 db,
                 x,
-                source=source,
-                url=url,
-                item_filter=
-                    nhc_item_is_real,
-                renderer=
-                    lambda item, s=source:
-                        render_nhc_two(
-                            item,
-                            s,
-                        ),
+                source,
+                url,
             )
 
         except Exception:

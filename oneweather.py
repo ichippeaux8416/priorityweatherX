@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-27-watch-updates-clean-nhc-v8.12'
+BUILD_ID = '2026-08-27-fire-winter-style-v8.13'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -8370,17 +8370,9 @@ def build_mapbox_spc_fire_map(
         product
     )
 
-    # Nationwide SPC/WPC outlook maps intentionally use slightly thinner
-    # state lines than local warning/watch/MD products.
-    base = add_reference_boundaries(
-        base,
-        bbox,
-        counties=False,
-        states=True,
-        state_halo_width=5,
-        state_line_width=3,
-    )
-
+    # Fire Weather maps already sit cleanly on the Mapbox basemap.  Drawing a
+    # second custom state-boundary dataset on top causes visible misalignment
+    # on this product family, so rely on the basemap's own state lines here.
     return save_map_image(
         base,
         prefix=f'spc_fire_day{day}_',
@@ -8478,6 +8470,57 @@ def build_mapbox_wpc_ero_map(
             f'wpc_ero_d{day}_',
     )
 
+
+
+
+def build_mapbox_wpc_winter_map(
+    layers: str,
+    *,
+    prefix: str,
+) -> str:
+    width = 1200
+    height = 760
+
+    # Keep WPC winter outlooks in the same national outlook map family as SPC
+    # convective/fire and WPC ERO products.
+    bbox = mercator_bbox_from_lonlat(
+        -128,
+        22,
+        -65,
+        52,
+    )
+
+    base = fetch_mapbox_light_base(
+        bbox,
+        width,
+        height,
+    )
+
+    product = export_map_image(
+        f'{WPC_WINTER_MAPSERVER}/export',
+        bbox,
+        width,
+        height,
+        layers=layers,
+    )
+
+    base.alpha_composite(
+        product
+    )
+
+    base = add_reference_boundaries(
+        base,
+        bbox,
+        counties=False,
+        states=True,
+        state_halo_width=5,
+        state_line_width=3,
+    )
+
+    return save_map_image(
+        base,
+        prefix=prefix,
+    )
 
 def spc_latlon_polygon_geometry(
     text: str,
@@ -17129,7 +17172,7 @@ def poll_nhc_basin_feed(
     ]
 
     state_source = (
-        f'nhc_basin_products_v812:{basin}'
+        f'nhc_basin_products_v813:{basin}'
     )
 
     if not db.source_primed(
@@ -18834,7 +18877,7 @@ def parse_wpc_ero(
     )
 
     if not attrs:
-        raise ValueError(
+        raise RetryableSourceDataError(
             f'WPC ERO Day {day} '
             'returned no features'
         )
@@ -19120,6 +19163,13 @@ def poll_wpc_ero(
                 cleanup_post(
                     post
                 )
+
+        except RetryableSourceDataError as exc:
+            log.info(
+                'Deferred WPC ERO Day %d: %s',
+                day,
+                exc,
+            )
 
         except Exception:
             log.exception(
@@ -19950,8 +20000,7 @@ def render_wpc_winter_day(
 
     try:
         image_path = (
-            build_service_map(
-                WPC_WINTER_MAPSERVER,
+            build_mapbox_wpc_winter_map(
                 layers,
                 prefix=
                     f'wpc_winter_d'

@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-27-nhc-dedupe-pretty-v8.14'
+BUILD_ID = '2026-08-28-nhc-hard-dedupe-clean-cone-v8.15'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -11706,14 +11706,14 @@ def nhc_storm_identity(
 
     product_tail = (
         r'(?:'
-        r'Advisory|'
-        r'Intermediate\s+Advisory|'
-        r'Special\s+Advisory|'
-        r'Forecast/Advisory|'
-        r'Forecast\s+Advisory|'
-        r'Forecast\s+Discussion|'
+        r'(?:Tropical\s+Cyclone\s+)?Advisory|'
+        r'(?:Tropical\s+Cyclone\s+)?Intermediate\s+Advisory|'
+        r'(?:Tropical\s+Cyclone\s+)?Special\s+Advisory|'
+        r'(?:Tropical\s+Cyclone\s+)?Forecast/Advisory|'
+        r'(?:Tropical\s+Cyclone\s+)?Forecast\s+Advisory|'
+        r'(?:Tropical\s+Cyclone\s+)?Forecast\s+Discussion|'
         r'Tropical\s+Cyclone\s+Update|'
-        r'Public\s+Advisory|'
+        r'(?:Tropical\s+Cyclone\s+)?Public\s+Advisory|'
         r'Update'
         r')'
     )
@@ -15493,10 +15493,10 @@ def nhc_draw_clean_cone(
             draw.polygon(
                 pixels,
                 fill=(
-                    223,
-                    229,
-                    236,
                     205,
+                    219,
+                    233,
+                    218,
                 ),
             )
 
@@ -15512,19 +15512,19 @@ def nhc_draw_clean_cone(
                     255,
                     245,
                 ),
-                width=12,
+                width=14,
                 joint='curve',
             )
 
             draw.line(
                 closed,
                 fill=(
-                    220,
+                    204,
                     24,
-                    35,
+                    36,
                     255,
                 ),
-                width=6,
+                width=7,
                 joint='curve',
             )
 
@@ -15749,16 +15749,17 @@ def nhc_draw_clean_forecast_labels(
     )
 
     font = load_font(
-        28,
+        22,
         True,
     )
 
-    selected: list[
-        tuple[
-            int,
-            dict[str, Any],
-        ]
-    ] = []
+    # ArcGIS can occasionally expose more than one point for the same tau
+    # during a layer refresh. Never draw duplicate labels for one forecast
+    # hour; keep the newest feature only.
+    by_tau: dict[
+        int,
+        dict[str, Any],
+    ] = {}
 
     for index, feature in enumerate(
         forecast_points
@@ -15768,7 +15769,7 @@ def nhc_draw_clean_forecast_labels(
             index,
         )
 
-        if tau in {
+        if tau not in {
             0,
             24,
             48,
@@ -15776,18 +15777,40 @@ def nhc_draw_clean_forecast_labels(
             96,
             120,
         }:
-            selected.append(
-                (
-                    tau,
-                    feature,
-                )
-            )
+            continue
+
+        existing = by_tau.get(
+            tau
+        )
+
+        if existing is None:
+            by_tau[tau] = feature
+            continue
+
+        existing_time = nhc_feature_latest_time(
+            [
+                existing
+            ]
+        )
+        candidate_time = nhc_feature_latest_time(
+            [
+                feature
+            ]
+        )
+
+        if candidate_time >= existing_time:
+            by_tau[tau] = feature
 
     occupied: list[
         tuple[int, int, int, int]
     ] = []
 
-    for tau, feature in selected:
+    for order, tau in enumerate(
+        sorted(
+            by_tau
+        )
+    ):
+        feature = by_tau[tau]
         attrs = (
             feature.get(
                 'attributes'
@@ -15795,7 +15818,6 @@ def nhc_draw_clean_forecast_labels(
             or
             {}
         )
-
         geometry = (
             feature.get(
                 'geometry'
@@ -15867,9 +15889,9 @@ def nhc_draw_clean_forecast_labels(
                 255,
             ),
             outline=(
-                15,
                 20,
-                28,
+                30,
+                42,
                 255,
             ),
             width=4,
@@ -15878,36 +15900,78 @@ def nhc_draw_clean_forecast_labels(
         if wind_mph is None:
             continue
 
+        # Two-line labels stay compact horizontally and make the cone, rather
+        # than the text boxes, the dominant visual element.
         label = (
-            f'NOW {wind_mph} mph'
+            f'NOW\n{wind_mph} mph'
             if tau == 0
             else
-            f'+{tau}h {wind_mph} mph'
+            f'{tau}h\n{wind_mph} mph'
         )
 
-        text_box = draw.textbbox(
+        text_box = draw.multiline_textbbox(
             (0, 0),
             label,
             font=font,
+            spacing=1,
+            align='center',
         )
-
         text_width = text_box[2] - text_box[0]
         text_height = text_box[3] - text_box[1]
         pad_x = 10
-        pad_y = 6
+        pad_y = 7
         box_width = text_width + pad_x * 2
         box_height = text_height + pad_y * 2
 
-        candidate_xy = [
-            (px + 18, py - box_height - 16),
-            (px + 18, py + 14),
-            (px - box_width - 18, py - box_height - 16),
-            (px - box_width - 18, py + 14),
-            (px - box_width / 2, py - box_height - 20),
-            (px - box_width / 2, py + 18),
-            (px + 24, py - box_height / 2),
-            (px - box_width - 24, py - box_height / 2),
-        ]
+        prefer_above = (
+            order % 2 == 0
+        )
+
+        above = (
+            px - box_width // 2,
+            py - box_height - 24,
+        )
+        below = (
+            px - box_width // 2,
+            py + 24,
+        )
+        upper_right = (
+            px + 22,
+            py - box_height - 14,
+        )
+        lower_right = (
+            px + 22,
+            py + 14,
+        )
+        upper_left = (
+            px - box_width - 22,
+            py - box_height - 14,
+        )
+        lower_left = (
+            px - box_width - 22,
+            py + 14,
+        )
+
+        candidate_xy = (
+            [
+                above,
+                below,
+                upper_right,
+                lower_right,
+                upper_left,
+                lower_left,
+            ]
+            if prefer_above
+            else
+            [
+                below,
+                above,
+                lower_left,
+                upper_left,
+                lower_right,
+                upper_right,
+            ]
+        )
 
         chosen: Optional[
             tuple[int, int, int, int]
@@ -15916,18 +15980,18 @@ def nhc_draw_clean_forecast_labels(
         for left, top in candidate_xy:
             left = int(
                 max(
-                    7,
+                    8,
                     min(
-                        out.width - box_width - 7,
+                        out.width - box_width - 8,
                         left,
                     ),
                 )
             )
             top = int(
                 max(
-                    7,
+                    8,
                     min(
-                        out.height - box_height - 7,
+                        out.height - box_height - 8,
                         top,
                     ),
                 )
@@ -15944,6 +16008,7 @@ def nhc_draw_clean_forecast_labels(
                 nhc_rects_intersect(
                     rect,
                     other,
+                    padding=12,
                 )
                 for other in occupied
             ):
@@ -15951,6 +16016,8 @@ def nhc_draw_clean_forecast_labels(
                 break
 
         if chosen is None:
+            # Never overlap labels. It is better to omit one distant forecast
+            # label than to create the unreadable stack seen in v8.14.
             continue
 
         occupied.append(
@@ -15960,23 +16027,18 @@ def nhc_draw_clean_forecast_labels(
         anchor_x = min(
             max(
                 px,
-                chosen[0] + 12,
+                chosen[0] + 10,
             ),
-            chosen[2] - 12,
+            chosen[2] - 10,
         )
 
-        if py < chosen[1]:
-            anchor_y = chosen[1]
-        elif py > chosen[3]:
-            anchor_y = chosen[3]
-        else:
-            anchor_y = min(
-                max(
-                    py,
-                    chosen[1] + 10,
-                ),
-                chosen[3] - 10,
-            )
+        anchor_y = (
+            chosen[3]
+            if chosen[3] < py
+            else chosen[1]
+            if chosen[1] > py
+            else py
+        )
 
         draw.line(
             (
@@ -15993,7 +16055,6 @@ def nhc_draw_clean_forecast_labels(
             ),
             width=5,
         )
-
         draw.line(
             (
                 px,
@@ -16002,45 +16063,48 @@ def nhc_draw_clean_forecast_labels(
                 anchor_y,
             ),
             fill=(
-                35,
-                43,
-                54,
-                220,
+                25,
+                34,
+                46,
+                225,
             ),
             width=2,
         )
 
         draw.rounded_rectangle(
             chosen,
-            radius=9,
+            radius=10,
             fill=(
-                255,
-                255,
-                255,
-                232,
+                24,
+                34,
+                46,
+                238,
             ),
             outline=(
-                32,
-                40,
-                52,
-                215,
+                255,
+                255,
+                255,
+                245,
             ),
             width=2,
         )
 
-        draw.text(
+        draw.multiline_text(
             (
-                chosen[0] + pad_x,
+                chosen[0] + box_width / 2,
                 chosen[1] + pad_y,
             ),
             label,
             font=font,
             fill=(
-                10,
-                15,
-                22,
+                255,
+                255,
+                255,
                 255,
             ),
+            spacing=1,
+            anchor='ma',
+            align='center',
         )
 
     return out
@@ -16167,15 +16231,15 @@ def build_mapbox_nhc_storm_map(
         return ''
 
     width = 1200
-    height = 760
+    height = 675
 
     bbox = mercator_bbox_from_points(
         map_points,
         width,
         height,
-        padding_factor=1.10,
-        min_width_m=1400000.0,
-        min_height_m=880000.0,
+        padding_factor=1.08,
+        min_width_m=1300000.0,
+        min_height_m=620000.0,
     )
 
     base = fetch_mapbox_light_base(
@@ -16888,6 +16952,7 @@ def nhc_basin_item_kind(
 
 
 NHC_RECENT_CYCLE_TTL_SECONDS = 8 * 3600
+NHC_STORM_REFRESH_COOLDOWN_SECONDS = 45 * 60
 
 
 def nhc_recent_cycle_meta_key(
@@ -16943,24 +17008,66 @@ def nhc_mark_recent_cycle_posted(
     )
 
 
-def nhc_advisory_cycle_signature(
+def nhc_storm_core_token(
     item: RSSItem,
-    kind: str,
-    basin: str,
 ) -> str:
-    raw = item.multiline_text
-    storm = (
+    _storm_type, storm_name = nhc_storm_identity(
+        item
+    )
+
+    return nhc_normalized_storm_token(
+        storm_name
+        or
         nhc_storm_name(
             item
         )
         or
-        squish(
-            item.title
-        )
+        item.title
     )
 
-    advisory = ''
 
+def nhc_round_to_three_hour_cycle(
+    value: Optional[datetime],
+) -> str:
+    if value is None:
+        value = utcnow()
+
+    if value.tzinfo is None:
+        value = value.replace(
+            tzinfo=timezone.utc
+        )
+    else:
+        value = value.astimezone(
+            timezone.utc
+        )
+
+    epoch = value.timestamp()
+    step = 3 * 3600
+    rounded = (
+        int(
+            (
+                epoch
+                +
+                step / 2
+            )
+            //
+            step
+        )
+        *
+        step
+    )
+
+    return datetime.fromtimestamp(
+        rounded,
+        tz=timezone.utc,
+    ).strftime(
+        '%Y%m%d%H'
+    )
+
+
+def nhc_text_advisory_number(
+    raw: str,
+) -> str:
     for pattern in (
         r'(?i)ADVISORY\s+NUMBER\s+([0-9]+[A-Z]?)',
         r'(?i)FORECAST/?ADVISORY\s+NUMBER\s+([0-9]+[A-Z]?)',
@@ -16971,57 +17078,54 @@ def nhc_advisory_cycle_signature(
         )
 
         if match:
-            advisory = nhc_normalize_advisory_token(
+            return nhc_normalize_advisory_token(
                 match.group(1)
             )
-            break
 
-    if not advisory:
-        try:
-            forecast_points, _storm_name, _source = (
-                nhc_select_forecast_group(
-                    item,
-                    basin,
-                )
+    return ''
+
+
+def nhc_gis_advisory_number(
+    item: RSSItem,
+    basin: str,
+) -> str:
+    try:
+        forecast_points, _storm_name, _source = (
+            nhc_select_forecast_group(
+                item,
+                basin,
             )
-        except Exception:
-            forecast_points = []
-
-        if forecast_points:
-            first_attrs = (
-                forecast_points[0].get(
-                    'attributes'
-                )
-                or
-                {}
-            )
-            advisory = nhc_normalize_advisory_token(
-                first_attrs.get(
-                    'advisnum'
-                )
-            )
-
-    wmo_stamp = ''
-    match = re.search(
-        r'(?im)^\s*[A-Z]{4}\d{2}\s+[A-Z]{4}\s+(\d{6})',
-        raw,
-    )
-
-    if match:
-        wmo_stamp = match.group(1)
-
-    issued = find_local_issue_clock(
-        raw
-    )
-
-    published = (
-        item.published.strftime(
-            '%Y%m%d%H%M'
         )
-        if item.published
-        else ''
-    )
+    except Exception:
+        forecast_points = []
 
+    for feature in forecast_points:
+        attrs = (
+            feature.get(
+                'attributes'
+            )
+            or
+            {}
+        )
+
+        advisory = nhc_normalize_advisory_token(
+            attrs.get(
+                'advisnum'
+            )
+        )
+
+        if advisory:
+            return advisory
+
+    return ''
+
+
+def nhc_advisory_cycle_signature(
+    item: RSSItem,
+    kind: str,
+    basin: str,
+) -> str:
+    raw = item.multiline_text
     season = (
         item.published.strftime(
             '%Y'
@@ -17032,25 +17136,59 @@ def nhc_advisory_cycle_signature(
         )
     )
 
-    storm_token = nhc_normalized_storm_token(
-        storm
+    storm_token = nhc_storm_core_token(
+        item
     )
 
-    family = (
-        'nhc_update'
-        if kind == 'tcu'
-        else 'nhc_advisory'
+    wmo_stamp = ''
+    match = re.search(
+        r'(?im)^\s*[A-Z]{4}\d{2}\s+[A-Z]{4}\s+(\d{6})\b',
+        raw,
     )
 
-    cycle_token = (
-        advisory
-        or
-        wmo_stamp
-        or
-        issued
-        or
-        published
+    if match:
+        wmo_stamp = match.group(1)
+
+    published = (
+        item.published.strftime(
+            '%Y%m%d%H%M'
+        )
+        if item.published
+        else ''
     )
+
+    raw_upper = raw.upper()
+
+    if (
+        kind == 'tcu'
+        or
+        'SPECIAL ADVISORY' in raw_upper
+    ):
+        # True between-cycle/special products remain independently postable.
+        cycle_token = (
+            wmo_stamp
+            or
+            published
+            or
+            sha256_text(
+                raw
+            )[:12]
+        )
+        family = (
+            'nhc_update'
+            if kind == 'tcu'
+            else 'nhc_special'
+        )
+
+    else:
+        # Normal TCD, TCM and TCP documents belonging to one NHC refresh are
+        # issued within the same standard three-hour advisory slot but can be
+        # timestamped several minutes apart. Key the whole refresh by that slot
+        # so those documents can never become separate X posts.
+        cycle_token = nhc_round_to_three_hour_cycle(
+            item.published
+        )
+        family = 'nhc_advisory'
 
     return sha256_text(
         '|'.join(
@@ -17064,52 +17202,11 @@ def nhc_advisory_cycle_signature(
         )
     )
 
-def nhc_product_logical_key(
+
+def nhc_storm_refresh_meta_key(
     item: RSSItem,
-    kind: str,
     basin: str,
 ) -> str:
-    raw = item.multiline_text
-    storm = (
-        nhc_storm_name(
-            item
-        )
-        or
-        squish(
-            item.title
-        )
-    )
-
-    advisory = ''
-
-    for pattern in (
-        r'(?i)ADVISORY\s+NUMBER\s+([0-9]+[A-Z]?)',
-        r'(?i)FORECAST/?ADVISORY\s+NUMBER\s+([0-9]+[A-Z]?)',
-    ):
-        match = re.search(
-            pattern,
-            raw,
-        )
-
-        if match:
-            advisory = nhc_normalize_advisory_token(
-                match.group(1)
-            )
-            break
-
-    wmo_stamp = ''
-    match = re.search(
-        r'(?im)^\s*[A-Z]{4}\d{2}\s+[A-Z]{4}\s+(\d{6})\b',
-        raw,
-    )
-
-    if match:
-        wmo_stamp = match.group(1)
-
-    storm_token = nhc_normalized_storm_token(
-        storm
-    )
-
     season = (
         item.published.strftime(
             '%Y'
@@ -17120,68 +17217,100 @@ def nhc_product_logical_key(
         )
     )
 
-    if kind == 'tcu':
-        # A Tropical Cyclone Update is a genuinely new between-advisory event.
-        # Keep it separate, but still collapse duplicate copies of that update
-        # from basin and wallet feeds by its official WMO issuance minute.
-        published = (
-            item.published.strftime(
-                '%Y%m%d%H%M'
-            )
-            if item.published
-            else ''
+    return (
+        'nhc:storm-refresh:'
+        +
+        season
+        +
+        ':'
+        +
+        basin
+        +
+        ':'
+        +
+        nhc_storm_core_token(
+            item
         )
-
-        identity = '|'.join(
-            (
-                'nhc_update',
-                season,
-                basin,
-                storm_token,
-                wmo_stamp
-                or
-                published,
-            )
-        )
-
-    elif advisory:
-        # The public advisory, forecast advisory and discussion are different
-        # documents for one NHC advisory cycle.  They must result in ONE social
-        # post, not three-to-five near-simultaneous posts.
-        identity = '|'.join(
-            (
-                'nhc_advisory',
-                season,
-                basin,
-                storm_token,
-                advisory,
-            )
-        )
-
-    else:
-        published = (
-            item.published.strftime(
-                '%Y%m%d%H%M'
-            )
-            if item.published
-            else ''
-        )
-
-        identity = '|'.join(
-            (
-                'nhc_product',
-                season,
-                basin,
-                storm_token,
-                wmo_stamp
-                or
-                published,
-            )
-        )
-
-    return sha256_text(
-        identity
     )
+
+
+def nhc_storm_refresh_recently_posted(
+    db: StateDB,
+    item: RSSItem,
+    kind: str,
+    basin: str,
+) -> bool:
+    raw_upper = item.multiline_text.upper()
+
+    if (
+        kind == 'tcu'
+        or
+        'SPECIAL ADVISORY' in raw_upper
+        or
+        'SPECIAL TROPICAL CYCLONE UPDATE' in raw_upper
+    ):
+        return False
+
+    raw = db.get_meta(
+        nhc_storm_refresh_meta_key(
+            item,
+            basin,
+        ),
+        '0',
+    )
+
+    try:
+        posted_ts = float(
+            raw
+            or
+            '0'
+        )
+    except Exception:
+        posted_ts = 0.0
+
+    return (
+        posted_ts > 0.0
+        and
+        time.time() - posted_ts
+        <
+        NHC_STORM_REFRESH_COOLDOWN_SECONDS
+    )
+
+
+def nhc_mark_storm_refresh_posted(
+    db: StateDB,
+    item: RSSItem,
+    kind: str,
+    basin: str,
+) -> None:
+    if kind == 'tcu':
+        return
+
+    db.set_meta(
+        nhc_storm_refresh_meta_key(
+            item,
+            basin,
+        ),
+        str(
+            time.time()
+        ),
+    )
+
+
+def nhc_product_logical_key(
+    item: RSSItem,
+    kind: str,
+    basin: str,
+) -> str:
+    # Use the exact same advisory-cycle identity for database deduplication as
+    # the posting guard. TCD, TCM and TCP for one advisory refresh therefore
+    # collapse before rendering instead of racing one another to X.
+    return nhc_advisory_cycle_signature(
+        item,
+        kind,
+        basin,
+    )
+
 
 def nhc_collect_basin_items(
     db: StateDB,
@@ -17407,7 +17536,7 @@ def poll_nhc_basin_feed(
     ]
 
     state_source = (
-        f'nhc_basin_products_v814:{basin}'
+        f'nhc_basin_products_v815:{basin}'
     )
 
     if not db.source_primed(
@@ -17479,6 +17608,25 @@ def poll_nhc_basin_feed(
             )
             continue
 
+        if nhc_storm_refresh_recently_posted(
+            db,
+            item,
+            kind,
+            basin,
+        ):
+            db.mark_seen_without_post(
+                state_source,
+                key,
+                status='ignored',
+            )
+
+            log.info(
+                'Skipped duplicate NHC storm refresh for %s (%s)',
+                basin,
+                key[:16],
+            )
+            continue
+
         post: Optional[RenderedPost] = None
 
         try:
@@ -17508,6 +17656,12 @@ def poll_nhc_basin_feed(
                 nhc_mark_recent_cycle_posted(
                     db,
                     cycle_signature,
+                )
+                nhc_mark_storm_refresh_posted(
+                    db,
+                    item,
+                    kind,
+                    basin,
                 )
 
         except RetryableSourceDataError as exc:

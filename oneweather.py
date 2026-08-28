@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-28-nhc-hard-dedupe-clean-cone-v8.15'
+BUILD_ID = '2026-08-28-spc-raw-nhc-pretty-cone-v8.16'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -110,6 +110,29 @@ SPC_MCD_RAW_URL = (
     'data/raw/ac/'
     'acus11.kwns.swo.mcd.txt'
 )
+
+SPC_CONVECTIVE_RAW_URLS = {
+    1: (
+        'https://tgftp.nws.noaa.gov/'
+        'data/raw/ac/'
+        'acus01.kwns.swo.dy1.txt'
+    ),
+    2: (
+        'https://tgftp.nws.noaa.gov/'
+        'data/raw/ac/'
+        'acus02.kwns.swo.dy2.txt'
+    ),
+    3: (
+        'https://tgftp.nws.noaa.gov/'
+        'data/raw/ac/'
+        'acus03.kwns.swo.dy3.txt'
+    ),
+    4: (
+        'https://tgftp.nws.noaa.gov/'
+        'data/raw/ac/'
+        'acus48.kwns.swo.d48.txt'
+    ),
+}
 
 # The SPC watch-number last digit selects the rotating SAW/WWP slot.
 # These raw AWIPS products arrive before the downstream warning GIS layer,
@@ -4421,7 +4444,11 @@ def fetch_rss(
             'Accept':
                 'application/rss+xml,'
                 'application/xml,'
-                'text/xml,*/*'
+                'text/xml,*/*',
+            'Cache-Control':
+                'no-cache',
+            'Pragma':
+                'no-cache',
         },
     )
 
@@ -6467,48 +6494,30 @@ def spc_convective_logical_key(
 
     raw = item.multiline_text
 
+    issued = spc_product_issuance_datetime(
+        raw,
+        item.published,
+    )
+
+    if issued is not None:
+        return sha256_text(
+            f'day{day}|issued|{issued:%Y%m%d%H%M}'
+        )
+
     valid_match = re.search(
-        r'(?i)\bVALID\s+'
+        r'(?i)VALID\s+'
         r'(\d{6})Z\s*[-–]\s*'
-        r'(\d{6})Z\b',
+        r'(\d{6})Z',
         raw,
     )
 
     if valid_match:
-        # The valid period is the most stable identity SPC exposes across
-        # duplicate RSS representations of the same outlook issuance.
-        identity = (
+        return sha256_text(
             f'day{day}|valid|'
             f'{valid_match.group(1)}|'
             f'{valid_match.group(2)}'
         )
 
-        return sha256_text(
-            identity
-        )
-
-    wmo_match = re.search(
-        r'(?im)^\s*'
-        r'[A-Z]{4}\d{2}\s+KWNS\s+'
-        r'(\d{6})\b',
-        raw,
-    )
-
-    if not wmo_match:
-        wmo_match = re.search(
-            r'(?im)^\s*SPC\s+AC\s+'
-            r'(\d{6})\b',
-            raw,
-        )
-
-    if wmo_match:
-        return sha256_text(
-            f'day{day}|wmo|{wmo_match.group(1)}'
-        )
-
-    # Final fallback deliberately avoids GUID/link, since SPC can publish
-    # multiple RSS objects for one issuance.  Minute-rounded publication
-    # time plus day is much less likely to generate duplicate X posts.
     if item.published:
         published = item.published.astimezone(
             timezone.utc
@@ -6524,6 +6533,7 @@ def spc_convective_logical_key(
     return sha256_text(
         f'day{day}|{squish(item.title)}'
     )
+
 
 def spc_product_issuance_datetime(
     text: str,
@@ -8719,6 +8729,149 @@ def fetch_spc_mcd_raw_item(
             '</pre>'
         ),
     )
+
+
+def spc_convective_product_url(
+    day: int,
+) -> str:
+    if day == 1:
+        return (
+            'https://www.spc.noaa.gov/'
+            'products/outlook/day1otlk.html'
+        )
+
+    if day == 2:
+        return (
+            'https://www.spc.noaa.gov/'
+            'products/outlook/day2otlk.html'
+        )
+
+    if day == 3:
+        return (
+            'https://www.spc.noaa.gov/'
+            'products/outlook/day3otlk.html'
+        )
+
+    return (
+        'https://www.spc.noaa.gov/'
+        'products/exper/day4-8/'
+    )
+
+
+def fetch_spc_convective_raw_item(
+    day: int,
+) -> Optional[RSSItem]:
+    url = SPC_CONVECTIVE_RAW_URLS.get(
+        day
+    )
+
+    if not url:
+        return None
+
+    response = http_get(
+        url,
+        headers={
+            'Accept':
+                'text/plain,*/*',
+            'Cache-Control':
+                'no-cache',
+            'Pragma':
+                'no-cache',
+        },
+        timeout=(
+            5,
+            15,
+        ),
+    )
+
+    raw = response.text
+
+    if 'CONVECTIVE OUTLOOK' not in raw.upper():
+        return None
+
+    issued = spc_product_issuance_datetime(
+        raw,
+        utcnow(),
+    )
+
+    if issued is None:
+        return None
+
+    if (
+        utcnow()
+        -
+        issued
+        >
+        timedelta(
+            days=2,
+        )
+    ):
+        return None
+
+    title = (
+        f'Day '
+        f'{SPC_DAY_WORDS.get(day, str(day))} '
+        'Convective Outlook'
+    )
+
+    return RSSItem(
+        title=title,
+        link=spc_convective_product_url(
+            day
+        ),
+        guid=(
+            f'tgftp-spc-convective-'
+            f'd{day}-'
+            f'{issued:%Y%m%d%H%M}'
+        ),
+        pub_date=iso_z(
+            issued
+        ),
+        description_html=(
+            '<pre>'
+            +
+            html.escape(
+                raw
+            )
+            +
+            '</pre>'
+        ),
+    )
+
+
+def fetch_spc_convective_raw_items(
+) -> list[RSSItem]:
+    items: list[RSSItem] = []
+
+    for day in (
+        1,
+        2,
+        3,
+        4,
+    ):
+        try:
+            item = fetch_spc_convective_raw_item(
+                day
+            )
+        except requests.HTTPError as exc:
+            if getattr(
+                exc.response,
+                'status_code',
+                None,
+            ) in {
+                404,
+                410,
+            }:
+                continue
+
+            raise
+
+        if item is not None:
+            items.append(
+                item
+            )
+
+    return items
 
 
 def poll_spc_md_fast(
@@ -11065,20 +11218,36 @@ def poll_spc_convective_source(
     source: str,
     url: str,
 ) -> None:
-    accepted = [
-        item
-        for item
-        in fetch_rss(
-            url
+    candidates: list[RSSItem] = []
+
+    try:
+        candidates.extend(
+            fetch_spc_convective_raw_items()
         )
-        if spc_item_is_real(
-            item,
-            'convective',
+    except Exception:
+        log.exception(
+            'Direct TGFTP SPC convective source failed; using SPC RSS fallback'
         )
-    ]
+
+    try:
+        candidates.extend(
+            item
+            for item
+            in fetch_rss(
+                url
+            )
+            if spc_item_is_real(
+                item,
+                'convective',
+            )
+        )
+    except Exception:
+        log.exception(
+            'SPC convective RSS fallback failed'
+        )
 
     state_source = (
-        f'{source}:logical_cycle_v88'
+        f'{source}:logical_cycle_v816'
     )
 
     by_key: dict[
@@ -11086,7 +11255,7 @@ def poll_spc_convective_source(
         RSSItem,
     ] = {}
 
-    for item in accepted:
+    for item in candidates:
         key = spc_convective_logical_key(
             item
         )
@@ -11095,34 +11264,47 @@ def poll_spc_convective_source(
             key
         )
 
-        if (
-            existing is None
-            or
-            (
-                item.published
-                or
-                datetime(
-                    1970,
-                    1,
-                    1,
-                    tzinfo=timezone.utc,
-                )
-            )
-            >
-            (
-                existing.published
-                or
-                datetime(
-                    1970,
-                    1,
-                    1,
-                    tzinfo=timezone.utc,
-                )
-            )
-        ):
-            by_key[
-                key
-            ] = item
+        if existing is None:
+            by_key[key] = item
+            continue
+
+        existing_score = (
+            len(existing.multiline_text),
+            1
+            if 'tgftp' in (
+                existing.guid
+                +
+                existing.link
+            ).lower()
+            else 0,
+            existing.published
+            or datetime(
+                1970,
+                1,
+                1,
+                tzinfo=timezone.utc,
+            ),
+        )
+        candidate_score = (
+            len(item.multiline_text),
+            1
+            if 'tgftp' in (
+                item.guid
+                +
+                item.link
+            ).lower()
+            else 0,
+            item.published
+            or datetime(
+                1970,
+                1,
+                1,
+                tzinfo=timezone.utc,
+            ),
+        )
+
+        if candidate_score > existing_score:
+            by_key[key] = item
 
     prepared = sorted(
         by_key.items(),
@@ -11151,9 +11333,7 @@ def poll_spc_convective_source(
         )
 
         log.info(
-            'Primed %s with %d '
-            'existing logical SPC '
-            'outlook cycle(s)',
+            'Primed %s with %d current logical SPC outlook cycle(s)',
             state_source,
             len(
                 prepared
@@ -11177,91 +11357,44 @@ def poll_spc_convective_source(
         ):
             continue
 
-        deadline = (
-            time.monotonic()
-            +
-            SPC_RAPID_RETRY_WINDOW_SECONDS
-        )
+        post: Optional[
+            RenderedPost
+        ] = None
 
-        attempt = 0
+        try:
+            post = render_spc(
+                item,
+                'convective',
+            )
 
-        while not STOP_REQUESTED:
-            post: Optional[
-                RenderedPost
-            ] = None
-
-            try:
-                try:
-                    post = render_spc(
-                        item,
-                        'convective',
-                    )
-
-                except RetryableSourceDataError as exc:
-                    attempt += 1
-
-                    remaining = (
-                        deadline
-                        -
-                        time.monotonic()
-                    )
-
-                    if remaining <= 0:
-                        log.info(
-                            'Deferred %s %s after '
-                            '%d rapid attempt(s): %s',
-                            state_source,
-                            key[:16],
-                            attempt,
-                            exc,
-                        )
-
-                        break
-
-                    wait_seconds = min(
-                        float(
-                            SPC_RAPID_RETRY_SECONDS
-                        ),
-                        remaining,
-                    )
-
-                    log.info(
-                        'SPC outlook GIS not synchronized yet; '
-                        'rapid retry %d in %.0fs: %s',
-                        attempt,
-                        wait_seconds,
-                        exc,
-                    )
-
-                    time.sleep(
-                        wait_seconds
-                    )
-
-                    continue
-
-                if not post:
-                    db.mark_seen_without_post(
-                        state_source,
-                        key,
-                        status='ignored',
-                    )
-
-                    break
-
-                publish_once(
-                    db,
-                    x,
+            if not post:
+                db.mark_seen_without_post(
                     state_source,
                     key,
-                    post,
+                    status='ignored',
                 )
+                continue
 
-                break
+            publish_once(
+                db,
+                x,
+                state_source,
+                key,
+                post,
+            )
 
-            finally:
-                cleanup_post(
-                    post
-                )
+        except RetryableSourceDataError as exc:
+            log.info(
+                'Deferred %s %s until the official GIS catches up: %s',
+                state_source,
+                key[:16],
+                exc,
+            )
+
+        finally:
+            cleanup_post(
+                post
+            )
 
 
 def poll_spc_watches(
@@ -15730,6 +15863,256 @@ def nhc_rects_intersect(
     )
 
 
+def nhc_issue_timezone_abbreviation(
+    text: str,
+) -> str:
+    issued = find_local_issue_clock(
+        text
+    )
+
+    match = re.search(
+        r'([A-Z]{2,5})$',
+        issued,
+    )
+
+    return (
+        match.group(1).upper()
+        if match
+        else ''
+    )
+
+
+def nhc_localize_datetime(
+    value: Optional[datetime],
+    abbreviation: str,
+) -> Optional[datetime]:
+    if value is None:
+        return None
+
+    if value.tzinfo is None:
+        value = value.replace(
+            tzinfo=timezone.utc
+        )
+    else:
+        value = value.astimezone(
+            timezone.utc
+        )
+
+    offsets = {
+        'EDT': -4,
+        'EST': -5,
+        'CDT': -5,
+        'CST': -6,
+        'MDT': -6,
+        'MST': -7,
+        'PDT': -7,
+        'PST': -8,
+        'AKDT': -8,
+        'AKST': -9,
+        'HST': -10,
+        'AST': -4,
+    }
+
+    abbreviation = abbreviation.upper().strip()
+    offset = offsets.get(
+        abbreviation
+    )
+
+    if offset is None:
+        return value
+
+    return value.astimezone(
+        timezone(
+            timedelta(
+                hours=offset
+            ),
+            name=abbreviation,
+        )
+    )
+
+
+def nhc_format_label_datetime(
+    value: Optional[datetime],
+    abbreviation: str,
+) -> str:
+    local = nhc_localize_datetime(
+        value,
+        abbreviation,
+    )
+
+    if local is None:
+        return ''
+
+    fmt = (
+        '%-I:%M %p %a'
+        if local.minute
+        else '%-I %p %a'
+    )
+
+    return local.strftime(
+        fmt
+    )
+
+
+def nhc_guess_forecast_datetime(
+    feature: dict[str, Any],
+    reference_time: Optional[datetime],
+) -> Optional[datetime]:
+    attrs = (
+        feature.get(
+            'attributes'
+        )
+        or
+        {}
+    )
+
+    for key in (
+        'validtime',
+        'valid_time',
+        'validdate',
+        'valid_date',
+        'fcstdate',
+        'fcst_date',
+        'datetime',
+        'dtg',
+        'dt',
+        'time',
+        'synoptime',
+        'advisdate',
+    ):
+        dt = arcgis_datetime(
+            attrs.get(
+                key
+            )
+        )
+
+        if dt is not None:
+            return dt
+
+    if reference_time is None:
+        return None
+
+    tau = nhc_forecast_tau(
+        feature,
+        0,
+    )
+
+    return (
+        reference_time
+        +
+        timedelta(
+            hours=tau
+        )
+    )
+
+
+def nhc_marker_symbol(
+    wind_mph: Optional[int],
+) -> str:
+    if wind_mph is None:
+        return ''
+
+    if wind_mph < 39:
+        return 'D'
+
+    if wind_mph < 74:
+        return 'S'
+
+    if wind_mph < 111:
+        return 'H'
+
+    return 'M'
+
+
+def nhc_draw_current_x(
+    draw: ImageDraw.ImageDraw,
+    px: int,
+    py: int,
+) -> None:
+    draw.ellipse(
+        (
+            px - 18,
+            py - 18,
+            px + 18,
+            py + 18,
+        ),
+        fill=(231, 183, 31, 210),
+    )
+
+    draw.line(
+        (
+            px - 10,
+            py - 10,
+            px + 10,
+            py + 10,
+        ),
+        fill=(255, 255, 255, 250),
+        width=8,
+    )
+    draw.line(
+        (
+            px - 10,
+            py + 10,
+            px + 10,
+            py - 10,
+        ),
+        fill=(255, 255, 255, 250),
+        width=8,
+    )
+    draw.line(
+        (
+            px - 10,
+            py - 10,
+            px + 10,
+            py + 10,
+        ),
+        fill=(18, 24, 32, 255),
+        width=4,
+    )
+    draw.line(
+        (
+            px - 10,
+            py + 10,
+            px + 10,
+            py - 10,
+        ),
+        fill=(18, 24, 32, 255),
+        width=4,
+    )
+
+
+def nhc_draw_forecast_marker(
+    draw: ImageDraw.ImageDraw,
+    px: int,
+    py: int,
+    symbol: str,
+    font: Any,
+) -> None:
+    draw.ellipse(
+        (
+            px - 11,
+            py - 11,
+            px + 11,
+            py + 11,
+        ),
+        fill=(255, 255, 255, 245),
+        outline=(18, 24, 32, 255),
+        width=3,
+    )
+
+    if symbol:
+        draw.text(
+            (
+                px,
+                py - 1,
+            ),
+            symbol,
+            font=font,
+            fill=(18, 24, 32, 255),
+            anchor='mm',
+        )
+
+
 def nhc_draw_clean_forecast_labels(
     image: Image.Image,
     forecast_points: list[dict[str, Any]],
@@ -15738,6 +16121,8 @@ def nhc_draw_clean_forecast_labels(
     current_lon: Optional[float],
     current_lat: Optional[float],
     current_wind_mph: Optional[int],
+    reference_time: Optional[datetime],
+    clock_abbreviation: str,
 ) -> Image.Image:
     out = image.copy().convert(
         'RGBA'
@@ -15749,17 +16134,15 @@ def nhc_draw_clean_forecast_labels(
     )
 
     font = load_font(
-        22,
+        20,
+        True,
+    )
+    marker_font = load_font(
+        16,
         True,
     )
 
-    # ArcGIS can occasionally expose more than one point for the same tau
-    # during a layer refresh. Never draw duplicate labels for one forecast
-    # hour; keep the newest feature only.
-    by_tau: dict[
-        int,
-        dict[str, Any],
-    ] = {}
+    by_tau: dict[int, dict[str, Any]] = {}
 
     for index, feature in enumerate(
         forecast_points
@@ -15771,7 +16154,9 @@ def nhc_draw_clean_forecast_labels(
 
         if tau not in {
             0,
+            12,
             24,
+            36,
             48,
             72,
             96,
@@ -15787,64 +16172,24 @@ def nhc_draw_clean_forecast_labels(
             by_tau[tau] = feature
             continue
 
-        existing_time = nhc_feature_latest_time(
-            [
-                existing
-            ]
-        )
-        candidate_time = nhc_feature_latest_time(
-            [
-                feature
-            ]
-        )
-
+        existing_time = nhc_feature_latest_time([existing])
+        candidate_time = nhc_feature_latest_time([feature])
         if candidate_time >= existing_time:
             by_tau[tau] = feature
 
-    occupied: list[
-        tuple[int, int, int, int]
-    ] = []
+    nodes: list[dict[str, Any]] = []
 
-    for order, tau in enumerate(
-        sorted(
-            by_tau
-        )
-    ):
+    for tau in sorted(by_tau):
         feature = by_tau[tau]
-        attrs = (
-            feature.get(
-                'attributes'
-            )
-            or
-            {}
-        )
-        geometry = (
-            feature.get(
-                'geometry'
-            )
-            or
-            {}
-        )
+        attrs = feature.get('attributes') or {}
+        geometry = feature.get('geometry') or {}
 
-        if (
-            tau == 0
-            and
-            current_lon is not None
-            and
-            current_lat is not None
-        ):
-            point_x, point_y = lonlat_to_web_mercator(
-                current_lon,
-                current_lat,
-            )
+        if tau == 0 and current_lon is not None and current_lat is not None:
+            point_x, point_y = lonlat_to_web_mercator(current_lon, current_lat)
         else:
             try:
-                point_x = float(
-                    geometry['x']
-                )
-                point_y = float(
-                    geometry['y']
-                )
+                point_x = float(geometry['x'])
+                point_y = float(geometry['y'])
             except Exception:
                 continue
 
@@ -15856,58 +16201,37 @@ def nhc_draw_clean_forecast_labels(
             out.height,
         )
 
-        if (
-            tau == 0
-            and
-            current_wind_mph is not None
-        ):
-            wind_mph = current_wind_mph
-        else:
-            wind_mph = nhc_knots_to_mph(
-                attrs.get(
-                    'maxwind'
-                )
-            )
+        wind_mph = current_wind_mph if tau == 0 and current_wind_mph is not None else nhc_knots_to_mph(attrs.get('maxwind'))
+        valid_time = nhc_guess_forecast_datetime(feature, reference_time)
 
-        radius = (
-            11
-            if tau == 0
-            else 8
-        )
-
-        draw.ellipse(
-            (
-                px - radius,
-                py - radius,
-                px + radius,
-                py + radius,
-            ),
-            fill=(
-                255,
-                255,
-                255,
-                255,
-            ),
-            outline=(
-                20,
-                30,
-                42,
-                255,
-            ),
-            width=4,
-        )
-
-        if wind_mph is None:
+        label_lines: list[str] = []
+        if tau == 0:
+            label_lines.append('NOW')
+        time_label = nhc_format_label_datetime(valid_time, clock_abbreviation)
+        if time_label:
+            label_lines.append(time_label)
+        elif tau != 0:
+            label_lines.append(f'+{tau}h')
+        if wind_mph is not None:
+            label_lines.append(f'{wind_mph} mph')
+        if not label_lines:
             continue
 
-        # Two-line labels stay compact horizontally and make the cone, rather
-        # than the text boxes, the dominant visual element.
-        label = (
-            f'NOW\n{wind_mph} mph'
-            if tau == 0
-            else
-            f'{tau}h\n{wind_mph} mph'
-        )
+        nodes.append({
+            'tau': tau,
+            'px': px,
+            'py': py,
+            'wind_mph': wind_mph,
+            'label': '\n'.join(label_lines),
+            'current': tau == 0,
+        })
+
+    occupied: list[tuple[int, int, int, int]] = []
+
+    for index, node in enumerate(nodes):
+        px = int(node['px'])
+        py = int(node['py'])
+        label = str(node['label'])
 
         text_box = draw.multiline_textbbox(
             (0, 0),
@@ -15915,197 +16239,74 @@ def nhc_draw_clean_forecast_labels(
             font=font,
             spacing=1,
             align='center',
+            stroke_width=4,
         )
         text_width = text_box[2] - text_box[0]
         text_height = text_box[3] - text_box[1]
-        pad_x = 10
-        pad_y = 7
-        box_width = text_width + pad_x * 2
-        box_height = text_height + pad_y * 2
+        box_width = text_width + 12
+        box_height = text_height + 8
 
-        prefer_above = (
-            order % 2 == 0
-        )
+        if len(nodes) == 1:
+            vx, vy = 0.0, -1.0
+        elif index == 0:
+            vx = float(nodes[1]['px'] - px)
+            vy = float(nodes[1]['py'] - py)
+        elif index == len(nodes) - 1:
+            vx = float(px - nodes[index - 1]['px'])
+            vy = float(py - nodes[index - 1]['py'])
+        else:
+            vx = float(nodes[index + 1]['px'] - nodes[index - 1]['px'])
+            vy = float(nodes[index + 1]['py'] - nodes[index - 1]['py'])
 
-        above = (
-            px - box_width // 2,
-            py - box_height - 24,
-        )
-        below = (
-            px - box_width // 2,
-            py + 24,
-        )
-        upper_right = (
-            px + 22,
-            py - box_height - 14,
-        )
-        lower_right = (
-            px + 22,
-            py + 14,
-        )
-        upper_left = (
-            px - box_width - 22,
-            py - box_height - 14,
-        )
-        lower_left = (
-            px - box_width - 22,
-            py + 14,
-        )
+        length = max(math.hypot(vx, vy), 1.0)
+        vx /= length
+        vy /= length
+        if index % 2 == 0:
+            nx, ny = -vy, vx
+        else:
+            nx, ny = vy, -vx
 
-        candidate_xy = (
-            [
-                above,
-                below,
-                upper_right,
-                lower_right,
-                upper_left,
-                lower_left,
-            ]
-            if prefer_above
-            else
-            [
-                below,
-                above,
-                lower_left,
-                upper_left,
-                lower_right,
-                upper_right,
-            ]
-        )
+        candidates: list[tuple[int, int]] = []
+        for distance in (60, 80, 100):
+            candidates.append((int(round(px + nx * distance)), int(round(py + ny * distance))))
+        for distance in (60, 80):
+            candidates.append((int(round(px - nx * distance)), int(round(py - ny * distance))))
+        for tx in (34, -34):
+            candidates.append((px + tx, py - 46))
+            candidates.append((px + tx, py + 46))
 
-        chosen: Optional[
-            tuple[int, int, int, int]
-        ] = None
+        chosen = None
+        for center_x, center_y in candidates:
+            left = max(8, min(out.width - box_width - 8, center_x - box_width // 2))
+            top = max(8, min(out.height - box_height - 8, center_y - box_height // 2))
+            rect = (int(left), int(top), int(left + box_width), int(top + box_height))
+            if any(nhc_rects_intersect(rect, other, padding=12) for other in occupied):
+                continue
+            chosen = rect
+            break
 
-        for left, top in candidate_xy:
-            left = int(
-                max(
-                    8,
-                    min(
-                        out.width - box_width - 8,
-                        left,
-                    ),
-                )
-            )
-            top = int(
-                max(
-                    8,
-                    min(
-                        out.height - box_height - 8,
-                        top,
-                    ),
-                )
+        if chosen is not None:
+            occupied.append(chosen)
+            anchor_x = max(chosen[0] + 6, min(px, chosen[2] - 6))
+            anchor_y = chosen[3] - 2 if chosen[3] < py else chosen[1] + 2 if chosen[1] > py else py
+            draw.line((px, py, anchor_x, anchor_y), fill=(255, 255, 255, 250), width=6)
+            draw.line((px, py, anchor_x, anchor_y), fill=(18, 24, 32, 255), width=2)
+            draw.multiline_text(
+                ((chosen[0] + chosen[2]) / 2, chosen[1]),
+                label,
+                font=font,
+                fill=(18, 24, 32, 255),
+                stroke_width=4,
+                stroke_fill=(255, 255, 255, 250),
+                spacing=1,
+                anchor='ma',
+                align='center',
             )
 
-            rect = (
-                left,
-                top,
-                left + box_width,
-                top + box_height,
-            )
-
-            if not any(
-                nhc_rects_intersect(
-                    rect,
-                    other,
-                    padding=12,
-                )
-                for other in occupied
-            ):
-                chosen = rect
-                break
-
-        if chosen is None:
-            # Never overlap labels. It is better to omit one distant forecast
-            # label than to create the unreadable stack seen in v8.14.
-            continue
-
-        occupied.append(
-            chosen
-        )
-
-        anchor_x = min(
-            max(
-                px,
-                chosen[0] + 10,
-            ),
-            chosen[2] - 10,
-        )
-
-        anchor_y = (
-            chosen[3]
-            if chosen[3] < py
-            else chosen[1]
-            if chosen[1] > py
-            else py
-        )
-
-        draw.line(
-            (
-                px,
-                py,
-                anchor_x,
-                anchor_y,
-            ),
-            fill=(
-                255,
-                255,
-                255,
-                235,
-            ),
-            width=5,
-        )
-        draw.line(
-            (
-                px,
-                py,
-                anchor_x,
-                anchor_y,
-            ),
-            fill=(
-                25,
-                34,
-                46,
-                225,
-            ),
-            width=2,
-        )
-
-        draw.rounded_rectangle(
-            chosen,
-            radius=10,
-            fill=(
-                24,
-                34,
-                46,
-                238,
-            ),
-            outline=(
-                255,
-                255,
-                255,
-                245,
-            ),
-            width=2,
-        )
-
-        draw.multiline_text(
-            (
-                chosen[0] + box_width / 2,
-                chosen[1] + pad_y,
-            ),
-            label,
-            font=font,
-            fill=(
-                255,
-                255,
-                255,
-                255,
-            ),
-            spacing=1,
-            anchor='ma',
-            align='center',
-        )
+        if node['current']:
+            nhc_draw_current_x(draw, px, py)
+        else:
+            nhc_draw_forecast_marker(draw, px, py, nhc_marker_symbol(node['wind_mph']), marker_font)
 
     return out
 
@@ -16277,6 +16478,10 @@ def build_mapbox_nhc_storm_map(
         current_lon=current_lon,
         current_lat=current_lat,
         current_wind_mph=nhc_wind_mph(
+            item.multiline_text
+        ),
+        reference_time=item.published,
+        clock_abbreviation=nhc_issue_timezone_abbreviation(
             item.multiline_text
         ),
     )
@@ -16953,6 +17158,7 @@ def nhc_basin_item_kind(
 
 NHC_RECENT_CYCLE_TTL_SECONDS = 8 * 3600
 NHC_STORM_REFRESH_COOLDOWN_SECONDS = 45 * 60
+NHC_STORM_HARD_DEDUPE_SECONDS = 2 * 60
 
 
 def nhc_recent_cycle_meta_key(
@@ -17011,6 +17217,18 @@ def nhc_mark_recent_cycle_posted(
 def nhc_storm_core_token(
     item: RSSItem,
 ) -> str:
+    combined = (
+        f'{item.title}\n'
+        f'{item.multiline_text}'
+    )
+
+    storm_id = nhc_atcf_id(
+        combined
+    )
+
+    if storm_id:
+        return storm_id
+
     _storm_type, storm_name = nhc_storm_identity(
         item
     )
@@ -17288,6 +17506,84 @@ def nhc_mark_storm_refresh_posted(
 
     db.set_meta(
         nhc_storm_refresh_meta_key(
+            item,
+            basin,
+        ),
+        str(
+            time.time()
+        ),
+    )
+
+
+def nhc_recent_storm_post_meta_key(
+    item: RSSItem,
+    basin: str,
+) -> str:
+    season = (
+        item.published.strftime(
+            '%Y'
+        )
+        if item.published
+        else str(
+            utcnow().year
+        )
+    )
+
+    return (
+        'nhc:storm-hard-post:'
+        +
+        season
+        +
+        ':'
+        +
+        basin
+        +
+        ':'
+        +
+        nhc_storm_core_token(
+            item
+        )
+    )
+
+
+def nhc_recent_storm_posted(
+    db: StateDB,
+    item: RSSItem,
+    basin: str,
+    *,
+    ttl_seconds: int = NHC_STORM_HARD_DEDUPE_SECONDS,
+) -> bool:
+    raw = db.get_meta(
+        nhc_recent_storm_post_meta_key(
+            item,
+            basin,
+        ),
+        '0',
+    )
+
+    try:
+        posted_ts = float(
+            raw
+            or
+            '0'
+        )
+    except Exception:
+        posted_ts = 0.0
+
+    return (
+        posted_ts > 0.0
+        and
+        time.time() - posted_ts < ttl_seconds
+    )
+
+
+def nhc_mark_recent_storm_posted(
+    db: StateDB,
+    item: RSSItem,
+    basin: str,
+) -> None:
+    db.set_meta(
+        nhc_recent_storm_post_meta_key(
             item,
             basin,
         ),
@@ -17627,6 +17923,24 @@ def poll_nhc_basin_feed(
             )
             continue
 
+        if nhc_recent_storm_posted(
+            db,
+            item,
+            basin,
+        ):
+            db.mark_seen_without_post(
+                state_source,
+                key,
+                status='ignored',
+            )
+
+            log.info(
+                'Skipped near-duplicate NHC storm post for %s (%s)',
+                basin,
+                key[:16],
+            )
+            continue
+
         post: Optional[RenderedPost] = None
 
         try:
@@ -17661,6 +17975,11 @@ def poll_nhc_basin_feed(
                     db,
                     item,
                     kind,
+                    basin,
+                )
+                nhc_mark_recent_storm_posted(
+                    db,
+                    item,
                     basin,
                 )
 

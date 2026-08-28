@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-27-fire-winter-style-v8.13'
+BUILD_ID = '2026-08-27-nhc-dedupe-pretty-v8.14'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -15493,10 +15493,10 @@ def nhc_draw_clean_cone(
             draw.polygon(
                 pixels,
                 fill=(
-                    224,
+                    223,
                     229,
-                    234,
-                    165,
+                    236,
+                    205,
                 ),
             )
 
@@ -15512,19 +15512,19 @@ def nhc_draw_clean_cone(
                     255,
                     245,
                 ),
-                width=9,
+                width=12,
                 joint='curve',
             )
 
             draw.line(
                 closed,
                 fill=(
-                    214,
-                    25,
+                    220,
+                    24,
                     35,
                     255,
                 ),
-                width=5,
+                width=6,
                 joint='curve',
             )
 
@@ -15575,19 +15575,19 @@ def nhc_draw_clean_track(
                     255,
                     245,
                 ),
-                width=9,
+                width=10,
                 joint='curve',
             )
 
             draw.line(
                 pixels,
                 fill=(
-                    20,
-                    30,
-                    42,
+                    24,
+                    34,
+                    46,
                     255,
                 ),
-                width=5,
+                width=6,
                 joint='curve',
             )
 
@@ -15749,7 +15749,7 @@ def nhc_draw_clean_forecast_labels(
     )
 
     font = load_font(
-        25,
+        28,
         True,
     )
 
@@ -15848,9 +15848,9 @@ def nhc_draw_clean_forecast_labels(
             )
 
         radius = (
-            9
+            11
             if tau == 0
-            else 7
+            else 8
         )
 
         draw.ellipse(
@@ -15893,16 +15893,20 @@ def nhc_draw_clean_forecast_labels(
 
         text_width = text_box[2] - text_box[0]
         text_height = text_box[3] - text_box[1]
-        pad_x = 8
-        pad_y = 5
+        pad_x = 10
+        pad_y = 6
         box_width = text_width + pad_x * 2
         box_height = text_height + pad_y * 2
 
         candidate_xy = [
-            (px + 14, py - box_height - 10),
-            (px + 14, py + 10),
-            (px - box_width - 14, py - box_height - 10),
-            (px - box_width - 14, py + 10),
+            (px + 18, py - box_height - 16),
+            (px + 18, py + 14),
+            (px - box_width - 18, py - box_height - 16),
+            (px - box_width - 18, py + 14),
+            (px - box_width / 2, py - box_height - 20),
+            (px - box_width / 2, py + 18),
+            (px + 24, py - box_height / 2),
+            (px - box_width - 24, py - box_height / 2),
         ]
 
         chosen: Optional[
@@ -15953,20 +15957,73 @@ def nhc_draw_clean_forecast_labels(
             chosen
         )
 
-        draw.rounded_rectangle(
-            chosen,
-            radius=7,
+        anchor_x = min(
+            max(
+                px,
+                chosen[0] + 12,
+            ),
+            chosen[2] - 12,
+        )
+
+        if py < chosen[1]:
+            anchor_y = chosen[1]
+        elif py > chosen[3]:
+            anchor_y = chosen[3]
+        else:
+            anchor_y = min(
+                max(
+                    py,
+                    chosen[1] + 10,
+                ),
+                chosen[3] - 10,
+            )
+
+        draw.line(
+            (
+                px,
+                py,
+                anchor_x,
+                anchor_y,
+            ),
             fill=(
                 255,
                 255,
                 255,
-                225,
+                235,
+            ),
+            width=5,
+        )
+
+        draw.line(
+            (
+                px,
+                py,
+                anchor_x,
+                anchor_y,
+            ),
+            fill=(
+                35,
+                43,
+                54,
+                220,
+            ),
+            width=2,
+        )
+
+        draw.rounded_rectangle(
+            chosen,
+            radius=9,
+            fill=(
+                255,
+                255,
+                255,
+                232,
             ),
             outline=(
-                30,
-                38,
-                48,
-                205,
+                32,
+                40,
+                52,
+                215,
             ),
             width=2,
         )
@@ -16116,9 +16173,9 @@ def build_mapbox_nhc_storm_map(
         map_points,
         width,
         height,
-        padding_factor=1.18,
-        min_width_m=1250000.0,
-        min_height_m=760000.0,
+        padding_factor=1.10,
+        min_width_m=1400000.0,
+        min_height_m=880000.0,
     )
 
     base = fetch_mapbox_light_base(
@@ -16829,6 +16886,184 @@ def nhc_basin_item_kind(
     return ''
 
 
+
+NHC_RECENT_CYCLE_TTL_SECONDS = 8 * 3600
+
+
+def nhc_recent_cycle_meta_key(
+    cycle_signature: str,
+) -> str:
+    return (
+        'nhc:cycle-posted:'
+        +
+        cycle_signature
+    )
+
+
+def nhc_recent_cycle_was_posted(
+    db: StateDB,
+    cycle_signature: str,
+    *,
+    ttl_seconds: int = NHC_RECENT_CYCLE_TTL_SECONDS,
+) -> bool:
+    raw = db.get_meta(
+        nhc_recent_cycle_meta_key(
+            cycle_signature
+        ),
+        '0',
+    )
+
+    try:
+        posted_ts = float(
+            raw
+            or
+            '0'
+        )
+    except Exception:
+        posted_ts = 0.0
+
+    return (
+        posted_ts > 0.0
+        and
+        time.time() - posted_ts < ttl_seconds
+    )
+
+
+def nhc_mark_recent_cycle_posted(
+    db: StateDB,
+    cycle_signature: str,
+) -> None:
+    db.set_meta(
+        nhc_recent_cycle_meta_key(
+            cycle_signature
+        ),
+        str(
+            time.time()
+        ),
+    )
+
+
+def nhc_advisory_cycle_signature(
+    item: RSSItem,
+    kind: str,
+    basin: str,
+) -> str:
+    raw = item.multiline_text
+    storm = (
+        nhc_storm_name(
+            item
+        )
+        or
+        squish(
+            item.title
+        )
+    )
+
+    advisory = ''
+
+    for pattern in (
+        r'(?i)ADVISORY\s+NUMBER\s+([0-9]+[A-Z]?)',
+        r'(?i)FORECAST/?ADVISORY\s+NUMBER\s+([0-9]+[A-Z]?)',
+    ):
+        match = re.search(
+            pattern,
+            raw,
+        )
+
+        if match:
+            advisory = nhc_normalize_advisory_token(
+                match.group(1)
+            )
+            break
+
+    if not advisory:
+        try:
+            forecast_points, _storm_name, _source = (
+                nhc_select_forecast_group(
+                    item,
+                    basin,
+                )
+            )
+        except Exception:
+            forecast_points = []
+
+        if forecast_points:
+            first_attrs = (
+                forecast_points[0].get(
+                    'attributes'
+                )
+                or
+                {}
+            )
+            advisory = nhc_normalize_advisory_token(
+                first_attrs.get(
+                    'advisnum'
+                )
+            )
+
+    wmo_stamp = ''
+    match = re.search(
+        r'(?im)^\s*[A-Z]{4}\d{2}\s+[A-Z]{4}\s+(\d{6})',
+        raw,
+    )
+
+    if match:
+        wmo_stamp = match.group(1)
+
+    issued = find_local_issue_clock(
+        raw
+    )
+
+    published = (
+        item.published.strftime(
+            '%Y%m%d%H%M'
+        )
+        if item.published
+        else ''
+    )
+
+    season = (
+        item.published.strftime(
+            '%Y'
+        )
+        if item.published
+        else str(
+            utcnow().year
+        )
+    )
+
+    storm_token = nhc_normalized_storm_token(
+        storm
+    )
+
+    family = (
+        'nhc_update'
+        if kind == 'tcu'
+        else 'nhc_advisory'
+    )
+
+    cycle_token = (
+        advisory
+        or
+        wmo_stamp
+        or
+        issued
+        or
+        published
+    )
+
+    return sha256_text(
+        '|'.join(
+            (
+                family,
+                season,
+                basin,
+                storm_token,
+                cycle_token,
+            )
+        )
+    )
+
 def nhc_product_logical_key(
     item: RSSItem,
     kind: str,
@@ -17172,7 +17407,7 @@ def poll_nhc_basin_feed(
     ]
 
     state_source = (
-        f'nhc_basin_products_v813:{basin}'
+        f'nhc_basin_products_v814:{basin}'
     )
 
     if not db.source_primed(
@@ -17221,6 +17456,29 @@ def poll_nhc_basin_feed(
         ):
             continue
 
+        cycle_signature = nhc_advisory_cycle_signature(
+            item,
+            kind,
+            basin,
+        )
+
+        if nhc_recent_cycle_was_posted(
+            db,
+            cycle_signature,
+        ):
+            db.mark_seen_without_post(
+                state_source,
+                key,
+                status='ignored',
+            )
+
+            log.info(
+                'Skipped duplicate NHC advisory cycle for %s (%s)',
+                basin,
+                key[:16],
+            )
+            continue
+
         post: Optional[RenderedPost] = None
 
         try:
@@ -17238,13 +17496,19 @@ def poll_nhc_basin_feed(
                 )
                 continue
 
-            publish_once(
+            posted = publish_once(
                 db,
                 x,
                 state_source,
                 key,
                 post,
             )
+
+            if posted:
+                nhc_mark_recent_cycle_posted(
+                    db,
+                    cycle_signature,
+                )
 
         except RetryableSourceDataError as exc:
             log.info(

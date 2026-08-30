@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-30-nhc-forecast-group-fix-v8.19'
+BUILD_ID = '2026-08-30-spc-latest-only-border-align-v8.20'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -8258,6 +8258,186 @@ def build_mapbox_watch_outline_map(
     )
 
 
+def composite_national_outlook_with_reference_boundaries(
+    base: Image.Image,
+    product: Image.Image,
+    bbox: tuple[
+        float,
+        float,
+        float,
+        float,
+    ],
+    *,
+    state_halo_width: int = 5,
+    state_line_width: int = 3,
+) -> Image.Image:
+    width, height = base.size
+
+    out = base.copy().convert(
+        'RGBA'
+    )
+    out.alpha_composite(
+        product
+    )
+
+    try:
+        state_features = arcgis_query_features_in_bbox(
+            REFERENCE_MAPSERVER,
+            3,
+            bbox,
+            out_fields='objectid,state,name',
+            return_geometry=True,
+            out_sr=3857,
+        )
+
+        # Build a raster union of the exact same state polygons used for the
+        # black outlines.  Then erase only a narrow band immediately OUTSIDE
+        # that union.  This removes the small green/product overhang along the
+        # 49th parallel and other national borders without clipping the wider
+        # offshore outlook areas.
+        union_mask = Image.new(
+            'L',
+            (
+                width,
+                height,
+            ),
+            0,
+        )
+        mask_draw = ImageDraw.Draw(
+            union_mask
+        )
+
+        for feature in state_features:
+            geometry = (
+                feature.get(
+                    'geometry'
+                )
+                or
+                {}
+            )
+
+            for ring in arcgis_geometry_rings_mercator(
+                geometry,
+                default_wkid=3857,
+            ):
+                pixels = mercator_ring_to_pixels(
+                    ring,
+                    bbox,
+                    width,
+                    height,
+                )
+
+                if len(
+                    pixels
+                ) >= 3:
+                    mask_draw.polygon(
+                        pixels,
+                        fill=255,
+                    )
+
+        expanded = union_mask.filter(
+            ImageFilter.MaxFilter(
+                17
+            )
+        )
+        outside_band = ImageChops.subtract(
+            expanded,
+            union_mask,
+        )
+
+        out.paste(
+            base.convert(
+                'RGBA'
+            ),
+            (
+                0,
+                0,
+            ),
+            outside_band,
+        )
+
+        draw = ImageDraw.Draw(
+            out,
+            'RGBA',
+        )
+        halo_width = max(
+            state_line_width + 1,
+            state_halo_width,
+        )
+        line_width = max(
+            1,
+            state_line_width,
+        )
+
+        for feature in state_features:
+            geometry = (
+                feature.get(
+                    'geometry'
+                )
+                or
+                {}
+            )
+
+            for ring in arcgis_geometry_rings_mercator(
+                geometry,
+                default_wkid=3857,
+            ):
+                pixels = mercator_ring_to_pixels(
+                    ring,
+                    bbox,
+                    width,
+                    height,
+                )
+
+                if len(
+                    pixels
+                ) < 2:
+                    continue
+
+                closed = pixels + [
+                    pixels[0]
+                ]
+
+                draw.line(
+                    closed,
+                    fill=(
+                        255,
+                        255,
+                        255,
+                        235,
+                    ),
+                    width=halo_width,
+                    joint='curve',
+                )
+                draw.line(
+                    closed,
+                    fill=(
+                        0,
+                        0,
+                        0,
+                        255,
+                    ),
+                    width=line_width,
+                    joint='curve',
+                )
+
+        return out
+
+    except Exception:
+        log.exception(
+            'Could not align national outlook to NOAA reference borders; using normal boundary overlay'
+        )
+
+        return add_reference_boundaries(
+            out,
+            bbox,
+            counties=False,
+            states=True,
+            state_halo_width=state_halo_width,
+            state_line_width=state_line_width,
+        )
+
+
 def build_mapbox_spc_outlook_map(
     day: int,
     image_layer: int,
@@ -8350,15 +8530,10 @@ def build_mapbox_spc_outlook_map(
             f'show:{image_layer}',
     )
 
-    base.alpha_composite(
-        product
-    )
-
-    base = add_reference_boundaries(
+    base = composite_national_outlook_with_reference_boundaries(
         base,
+        product,
         bbox,
-        counties=False,
-        states=True,
         state_halo_width=5,
         state_line_width=3,
     )
@@ -8439,15 +8614,10 @@ def build_mapbox_spc_fire_map(
         ),
     )
 
-    base.alpha_composite(
-        product
-    )
-
-    base = add_reference_boundaries(
+    base = composite_national_outlook_with_reference_boundaries(
         base,
+        product,
         bbox,
-        counties=False,
-        states=True,
         state_halo_width=5,
         state_line_width=3,
     )
@@ -8530,15 +8700,10 @@ def build_mapbox_wpc_ero_map(
             f'show:{layer}',
     )
 
-    base.alpha_composite(
-        product
-    )
-
-    base = add_reference_boundaries(
+    base = composite_national_outlook_with_reference_boundaries(
         base,
+        product,
         bbox,
-        counties=False,
-        states=True,
         state_halo_width=5,
         state_line_width=3,
     )
@@ -8594,15 +8759,10 @@ def build_mapbox_wpc_winter_map(
         layers=layers,
     )
 
-    base.alpha_composite(
-        product
-    )
-
-    base = add_reference_boundaries(
+    base = composite_national_outlook_with_reference_boundaries(
         base,
+        product,
         bbox,
-        counties=False,
-        states=True,
         state_halo_width=5,
         state_line_width=3,
     )
@@ -11423,6 +11583,102 @@ def render_spc(
     )
 
 
+def spc_convective_item_issuance(
+    item: RSSItem,
+) -> Optional[datetime]:
+    issued = spc_product_issuance_datetime(
+        item.multiline_text,
+        item.published,
+    )
+
+    if issued is None:
+        return None
+
+    if issued.tzinfo is None:
+        issued = issued.replace(
+            tzinfo=timezone.utc
+        )
+
+    return issued.astimezone(
+        timezone.utc
+    )
+
+
+def spc_convective_highwater_key(
+    day: int,
+) -> str:
+    return (
+        f'spc:convective:day{day}:'
+        'posted_issuance_v820'
+    )
+
+
+def spc_convective_highwater(
+    db: StateDB,
+    day: int,
+) -> Optional[datetime]:
+    raw = db.get_meta(
+        spc_convective_highwater_key(
+            day
+        ),
+        '',
+    )
+
+    if not raw:
+        return None
+
+    try:
+        return datetime.fromtimestamp(
+            float(raw),
+            tz=timezone.utc,
+        )
+    except Exception:
+        return None
+
+
+def spc_mark_convective_highwater(
+    db: StateDB,
+    day: int,
+    issued: datetime,
+) -> None:
+    db.set_meta(
+        spc_convective_highwater_key(
+            day
+        ),
+        str(
+            issued.astimezone(
+                timezone.utc
+            ).timestamp()
+        ),
+    )
+
+
+def spc_convective_candidate_score(
+    item: RSSItem,
+) -> tuple[int, int, datetime]:
+    source_blob = (
+        f'{item.guid} '
+        f'{item.link}'
+    ).lower()
+
+    return (
+        1
+        if 'tgftp' in source_blob
+        else 0,
+        len(
+            item.multiline_text
+        ),
+        item.published
+        or
+        datetime(
+            1970,
+            1,
+            1,
+            tzinfo=timezone.utc,
+        ),
+    )
+
+
 def poll_spc_convective_source(
     db: StateDB,
     x: XPublisher,
@@ -11457,86 +11713,103 @@ def poll_spc_convective_source(
             'SPC convective RSS fallback failed'
         )
 
+    # IMPORTANT: only the newest official issuance for each outlook day is
+    # eligible to post.  Older cycles may remain in RSS/TGFTP for a while;
+    # they must never be allowed to surface after a newer cycle exists.
+    latest_by_day: dict[
+        int,
+        tuple[
+            datetime,
+            RSSItem,
+        ],
+    ] = {}
+
+    for item in candidates:
+        try:
+            day = spc_day_number(
+                item
+            )
+        except RetryableSourceDataError:
+            continue
+
+        issued = spc_convective_item_issuance(
+            item
+        )
+
+        if issued is None:
+            continue
+
+        existing = latest_by_day.get(
+            day
+        )
+
+        if existing is None:
+            latest_by_day[day] = (
+                issued,
+                item,
+            )
+            continue
+
+        existing_issued, existing_item = existing
+
+        if issued > existing_issued:
+            latest_by_day[day] = (
+                issued,
+                item,
+            )
+            continue
+
+        if (
+            issued == existing_issued
+            and
+            spc_convective_candidate_score(
+                item
+            )
+            >
+            spc_convective_candidate_score(
+                existing_item
+            )
+        ):
+            latest_by_day[day] = (
+                issued,
+                item,
+            )
+
     state_source = (
         f'{source}:logical_cycle_v817'
     )
 
-    by_key: dict[
-        str,
-        RSSItem,
-    ] = {}
-
-    for item in candidates:
-        key = spc_convective_logical_key(
-            item
-        )
-
-        existing = by_key.get(
-            key
-        )
-
-        if existing is None:
-            by_key[key] = item
-            continue
-
-        existing_score = (
-            len(existing.multiline_text),
-            1
-            if 'tgftp' in (
-                existing.guid
-                +
-                existing.link
-            ).lower()
-            else 0,
-            existing.published
-            or datetime(
-                1970,
-                1,
-                1,
-                tzinfo=timezone.utc,
-            ),
-        )
-        candidate_score = (
-            len(item.multiline_text),
-            1
-            if 'tgftp' in (
-                item.guid
-                +
-                item.link
-            ).lower()
-            else 0,
-            item.published
-            or datetime(
-                1970,
-                1,
-                1,
-                tzinfo=timezone.utc,
-            ),
-        )
-
-        if candidate_score > existing_score:
-            by_key[key] = item
-
     prepared = sorted(
-        by_key.items(),
-        key=lambda pair:
-            pair[1].published
-            or
-            datetime(
-                1970,
-                1,
-                1,
-                tzinfo=timezone.utc,
-            ),
+        [
+            (
+                day,
+                issued,
+                item,
+                spc_convective_logical_key(
+                    item
+                ),
+            )
+            for day, (
+                issued,
+                item,
+            )
+            in latest_by_day.items()
+        ],
+        key=lambda row: row[1],
     )
 
     if not db.source_primed(
         state_source
     ):
-        for key, _item in prepared:
+        for day, issued, _item, key in prepared:
             db.mark_seen_without_post(
                 state_source,
                 key,
+            )
+            spc_mark_convective_highwater(
+                db,
+                day,
+                issued,
             )
 
         db.mark_source_primed(
@@ -11544,7 +11817,7 @@ def poll_spc_convective_source(
         )
 
         log.info(
-            'Primed %s with %d current logical SPC outlook cycle(s)',
+            'Primed %s with %d current latest SPC outlook cycle(s)',
             state_source,
             len(
                 prepared
@@ -11553,18 +11826,40 @@ def poll_spc_convective_source(
 
         return
 
-    for key, item in prepared:
+    for day, issued, item, key in prepared:
+        highwater = spc_convective_highwater(
+            db,
+            day,
+        )
+
+        if (
+            highwater is not None
+            and
+            issued <= highwater
+        ):
+            continue
+
         current_status = db.status(
             state_source,
             key,
         )
 
+        if current_status in {
+            'posted',
+            'primed',
+            'ignored',
+        }:
+            spc_mark_convective_highwater(
+                db,
+                day,
+                issued,
+            )
+            continue
+
         if (
             current_status
             and
-            current_status
-            !=
-            'rejected'
+            current_status != 'rejected'
         ):
             continue
 
@@ -11573,6 +11868,10 @@ def poll_spc_convective_source(
         ] = None
 
         try:
+            # Detection stays fast: the newest issuance is known immediately
+            # from raw/RSS text.  If GIS is still on the prior cycle, simply
+            # defer this same newest issuance and retry on the next normal
+            # 15-second outlook poll.  Never fall back to an older issuance.
             post = render_spc(
                 item,
                 'convective',
@@ -11586,7 +11885,7 @@ def poll_spc_convective_source(
                 )
                 continue
 
-            publish_once(
+            posted = publish_once(
                 db,
                 x,
                 state_source,
@@ -11594,11 +11893,20 @@ def poll_spc_convective_source(
                 post,
             )
 
+            if posted:
+                spc_mark_convective_highwater(
+                    db,
+                    day,
+                    issued,
+                )
+
         except RetryableSourceDataError as exc:
             log.info(
-                'Deferred %s %s until the official GIS catches up: %s',
-                state_source,
-                key[:16],
+                'Deferred newest SPC Day %d issuance %s until matching GIS is ready: %s',
+                day,
+                issued.strftime(
+                    '%Y-%m-%d %H%MZ'
+                ),
                 exc,
             )
 
@@ -16336,26 +16644,50 @@ def nhc_draw_forecast_marker(
     symbol: str,
     font: Any,
 ) -> None:
+    is_hurricane = symbol in {
+        'H',
+        'M',
+    }
+    radius = (
+        15
+        if is_hurricane
+        else 11
+    )
+    outline_width = (
+        4
+        if is_hurricane
+        else 3
+    )
+
     draw.ellipse(
         (
-            px - 11,
-            py - 11,
-            px + 11,
-            py + 11,
+            px - radius,
+            py - radius,
+            px + radius,
+            py + radius,
         ),
         fill=(255, 255, 255, 245),
         outline=(18, 24, 32, 255),
-        width=3,
+        width=outline_width,
     )
 
     if symbol:
+        marker_font = (
+            load_font(
+                19,
+                True,
+            )
+            if is_hurricane
+            else font
+        )
+
         draw.text(
             (
                 px,
                 py - 1,
             ),
             symbol,
-            font=font,
+            font=marker_font,
             fill=(18, 24, 32, 255),
             anchor='mm',
         )

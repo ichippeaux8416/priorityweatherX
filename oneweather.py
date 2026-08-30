@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-30-spc-latest-only-border-align-v8.20'
+BUILD_ID = '2026-08-30-spc-live-newest-border-hm-v8.21'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -8337,12 +8337,57 @@ def composite_national_outlook_with_reference_boundaries(
 
         expanded = union_mask.filter(
             ImageFilter.MaxFilter(
-                17
+                29
             )
         )
         outside_band = ImageChops.subtract(
             expanded,
             union_mask,
+        )
+
+        # Target the visual mismatch along the U.S./Canada border without
+        # erasing legitimate coastal/offshore outlook shading.  Only the
+        # northern-border portion of the outside band is cleaned.
+        north_zone = Image.new(
+            'L',
+            (
+                width,
+                height,
+            ),
+            0,
+        )
+        north_draw = ImageDraw.Draw(
+            north_zone
+        )
+        _mx, north_y_merc = lonlat_to_web_mercator(
+            -100.0,
+            47.0,
+        )
+        _x_pixel, north_y_pixel = nhc_point_pixel_from_mercator(
+            bbox[0],
+            north_y_merc,
+            bbox,
+            width,
+            height,
+        )
+        north_draw.rectangle(
+            (
+                0,
+                0,
+                width,
+                max(
+                    0,
+                    min(
+                        height,
+                        north_y_pixel,
+                    ),
+                ),
+            ),
+            fill=255,
+        )
+        northern_outside_band = ImageChops.multiply(
+            outside_band,
+            north_zone,
         )
 
         out.paste(
@@ -8353,7 +8398,7 @@ def composite_national_outlook_with_reference_boundaries(
                 0,
                 0,
             ),
-            outside_band,
+            northern_outside_band,
         )
 
         draw = ImageDraw.Draw(
@@ -8996,6 +9041,223 @@ def spc_convective_product_url(
         'https://www.spc.noaa.gov/'
         'products/exper/day4-8/'
     )
+
+
+SPC_CONVECTIVE_SCHEDULE_MINUTES = {
+    1: (
+        60,
+        360,
+        780,
+        990,
+        1200,
+    ),
+    2: (
+        360,
+        1050,
+    ),
+    3: (
+        450,
+        1170,
+    ),
+}
+
+
+def spc_should_probe_live_outlook_page(
+    day: int,
+    now: Optional[datetime] = None,
+) -> bool:
+    schedules = SPC_CONVECTIVE_SCHEDULE_MINUTES.get(
+        day
+    )
+
+    if not schedules:
+        return False
+
+    current = (
+        now
+        or
+        utcnow()
+    ).astimezone(
+        timezone.utc
+    )
+
+    current_minutes = (
+        current.hour
+        *
+        60
+        +
+        current.minute
+    )
+
+    # SPC often publishes several minutes before the nominal outlook cycle.
+    # Probe the live product page around cycle time so a lagging TGFTP/RSS
+    # mirror cannot make us post the prior cycle.
+    for scheduled in schedules:
+        difference = abs(
+            current_minutes
+            -
+            scheduled
+        )
+        difference = min(
+            difference,
+            1440 - difference,
+        )
+
+        if difference <= 105:
+            return True
+
+    return False
+
+
+def fetch_spc_convective_live_page_item(
+    day: int,
+) -> Optional[RSSItem]:
+    url = spc_convective_product_url(
+        day
+    )
+
+    if not url:
+        return None
+
+    separator = '&' if '?' in url else '?'
+    cache_busted_url = (
+        f'{url}{separator}_ow='
+        f'{int(time.time() * 1000)}'
+    )
+
+    response = http_get(
+        cache_busted_url,
+        headers={
+            'Accept':
+                'text/html,application/xhtml+xml,*/*',
+            'User-Agent': (
+                'Mozilla/5.0 '
+                '(X11; Linux x86_64) '
+                'AppleWebKit/537.36 '
+                '(KHTML, like Gecko) '
+                'Chrome/127.0.0.0 '
+                'Safari/537.36'
+            ),
+            'Referer':
+                'https://www.spc.noaa.gov/',
+            'Accept-Language':
+                'en-US,en;q=0.9',
+            'Cache-Control':
+                'no-cache, no-store, max-age=0',
+            'Pragma':
+                'no-cache',
+        },
+        timeout=(
+            4,
+            9,
+        ),
+    )
+
+    soup = BeautifulSoup(
+        response.text,
+        'html.parser',
+    )
+    pre = soup.find(
+        'pre'
+    )
+    raw = (
+        pre.get_text(
+            '\n',
+            strip=True,
+        )
+        if pre
+        else soup.get_text(
+            '\n',
+            strip=True,
+        )
+    )
+
+    if 'CONVECTIVE OUTLOOK' not in raw.upper():
+        return None
+
+    issued = spc_product_issuance_datetime(
+        raw,
+        utcnow(),
+    )
+
+    if issued is None:
+        return None
+
+    if (
+        utcnow()
+        -
+        issued
+        >
+        timedelta(
+            days=2,
+        )
+    ):
+        return None
+
+    title = (
+        f'Day '
+        f'{SPC_DAY_WORDS.get(day, str(day))} '
+        'Convective Outlook'
+    )
+
+    return RSSItem(
+        title=title,
+        link=url,
+        guid=(
+            f'spc-live-page-convective-'
+            f'd{day}-'
+            f'{issued:%Y%m%d%H%M}'
+        ),
+        pub_date=iso_z(
+            issued
+        ),
+        description_html=(
+            '<pre>'
+            +
+            html.escape(
+                raw
+            )
+            +
+            '</pre>'
+        ),
+    )
+
+
+def fetch_spc_convective_live_page_items(
+) -> list[RSSItem]:
+    items: list[RSSItem] = []
+    now = utcnow()
+
+    for day in (
+        1,
+        2,
+        3,
+    ):
+        if not spc_should_probe_live_outlook_page(
+            day,
+            now,
+        ):
+            continue
+
+        try:
+            item = fetch_spc_convective_live_page_item(
+                day
+            )
+        except Exception as exc:
+            log.info(
+                'SPC Day %d live-page probe failed; '
+                'raw/RSS sources remain active: %s',
+                day,
+                exc,
+            )
+            continue
+
+        if item is not None:
+            items.append(
+                item
+            )
+
+    return items
 
 
 def fetch_spc_convective_raw_item(
@@ -10895,6 +11157,8 @@ def render_spc(
         item.link
         and
         not embedded_mcd_geometry
+        and
+        kind != 'convective'
     ):
         try:
             page_text, soup = (
@@ -11661,10 +11925,16 @@ def spc_convective_candidate_score(
         f'{item.link}'
     ).lower()
 
-    return (
-        1
+    source_rank = (
+        2
+        if 'spc-live-page-convective' in source_blob
+        else 1
         if 'tgftp' in source_blob
-        else 0,
+        else 0
+    )
+
+    return (
+        source_rank,
         len(
             item.multiline_text
         ),
@@ -11686,6 +11956,14 @@ def poll_spc_convective_source(
     url: str,
 ) -> None:
     candidates: list[RSSItem] = []
+
+    # During issuance windows, interrogate SPC's live current-product pages
+    # directly.  This prevents a lagging TGFTP/RSS mirror from making the bot
+    # publish the previous outlook cycle.  Outside those short windows there
+    # is no extra page request, preserving the fast scheduler cadence.
+    candidates.extend(
+        fetch_spc_convective_live_page_items()
+    )
 
     try:
         candidates.extend(
@@ -16649,7 +16927,7 @@ def nhc_draw_forecast_marker(
         'M',
     }
     radius = (
-        15
+        18
         if is_hurricane
         else 11
     )
@@ -16674,7 +16952,7 @@ def nhc_draw_forecast_marker(
     if symbol:
         marker_font = (
             load_font(
-                19,
+                22,
                 True,
             )
             if is_hurricane

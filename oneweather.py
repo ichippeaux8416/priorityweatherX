@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-29-preserve-sections-v8.18'
+BUILD_ID = '2026-08-30-nhc-forecast-group-fix-v8.19'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -15149,14 +15149,12 @@ def nhc_select_forecast_group(
             '',
         )
 
-    current_lon, current_lat = nhc_current_point_from_forecast_points(
-        forecast_points
+    # Use the advisory's stated current position only to rank/match the
+    # correct official GIS forecast group.  forecast_points does not exist
+    # until after this selection function returns.
+    current_lon, current_lat = nhc_lonlat_from_text(
+        item.multiline_text
     )
-
-    if current_lon is None or current_lat is None:
-        current_lon, current_lat = nhc_lonlat_from_text(
-            item.multiline_text
-        )
 
     wanted_name = nhc_normalized_storm_token(
         storm_name
@@ -16625,9 +16623,16 @@ def build_mapbox_nhc_storm_map(
                 )
             )
 
-    current_lon, current_lat = nhc_lonlat_from_text(
-        item.multiline_text
+    # For the plotted current-position X, prefer the official tau=0 NHC GIS
+    # forecast point.  Fall back to the advisory-text center only if needed.
+    current_lon, current_lat = nhc_current_point_from_forecast_points(
+        forecast_points
     )
+
+    if current_lon is None or current_lat is None:
+        current_lon, current_lat = nhc_lonlat_from_text(
+            item.multiline_text
+        )
 
     if (
         current_lon is not None

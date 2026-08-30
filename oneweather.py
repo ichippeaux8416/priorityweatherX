@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-29-clean-spc-lines-nhc-cone-v8.17'
+BUILD_ID = '2026-08-29-preserve-sections-v8.18'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -455,6 +455,54 @@ def truncate(
     return cut + '...'
 
 
+def truncate_post_text(
+    value: str,
+    limit: int,
+) -> str:
+    value = value.strip()
+    value = re.sub(r'[ \t]+', ' ', value)
+    value = re.sub(r' *\n *', '\n', value)
+    value = re.sub(r'\n{3,}', '\n\n', value)
+
+    if len(value) <= limit:
+        return value
+    if limit <= 1:
+        return value[:limit]
+
+    cut = value[:limit - 1].rstrip()
+    boundary = max(cut.rfind(' '), cut.rfind('\n'))
+    if boundary >= int(limit * 0.72):
+        cut = cut[:boundary].rstrip()
+    return cut + '...'
+
+
+def fit_post_sections(
+    sections: Iterable[str],
+    url: str = '',
+) -> str:
+    clean = [
+        remove_emojis(section.strip())
+        for section in sections
+        if section and section.strip()
+    ]
+
+    suffix = (
+        '\n\n' + url.strip()
+        if INCLUDE_SOURCE_URLS and url
+        else ''
+    )
+    budget = POST_TEXT_LIMIT - len(suffix)
+    if budget < 80:
+        suffix = ''
+        budget = POST_TEXT_LIMIT
+
+    post_text = '\n\n'.join(clean)
+    if len(post_text) > budget:
+        post_text = truncate_post_text(post_text, budget)
+
+    return remove_emojis(post_text + suffix)
+
+
 def fit_post(
     parts: Iterable[str],
     url: str = '',
@@ -495,7 +543,7 @@ def fit_post(
     text = '\n'.join(clean)
 
     if len(text) > budget:
-        text = truncate(
+        text = truncate_post_text(
             text,
             budget,
         )
@@ -1976,7 +2024,7 @@ class XPublisher:
         image_path: str = '',
     ) -> str:
         text = remove_emojis(
-            truncate(
+            truncate_post_text(
                 text.strip(),
                 POST_TEXT_LIMIT,
             )
@@ -10229,10 +10277,18 @@ def spc_md_peak_intensity_lines(
                 break
         if not value:
             continue
+
         if value.lower() in {'none', 'n/a', 'na', 'not expected'}:
             value = 'N/A'
+        else:
+            value = re.sub(r'(?i)^UP TO\b', 'Up to', value)
+            value = re.sub(r'(?i)\bMPH\b', 'mph', value)
+            value = re.sub(r'(?i)\bIN(?:CHES?)?\b', 'in', value)
+            value = re.sub(r'(?<=\d)-(?=\d)', '–', value)
+
         lines.append(f'{label}: {truncate(value, 44)}')
     return lines
+
 
 def arcgis_datetime(
     value: Any,
@@ -10983,45 +11039,49 @@ def render_spc(
             page_text
         )
 
-        post_lines: list[str] = [
+        header_lines: list[str] = [
             product_name,
         ]
+
         if issued:
-            post_lines.append(
+            header_lines.append(
                 f'Issued {issued}'
             )
-        elif item.published:
-            post_lines.append(
-                'Issued '
-                + item.published.strftime('%-I:%M %p UTC')
-            )
 
+        # The public MD layout should stay local-time only.
         if location and location.strip().lower() != 'united states':
-            post_lines.append(
+            header_lines.append(
                 truncate(location, 115)
             )
 
+        sections: list[str] = [
+            '\n'.join(header_lines),
+        ]
+
         if probability:
-            post_lines.append(
+            sections.append(
                 'Chance of watch issuance: '
                 f'{probability.group(1)}%'
             )
 
         if peak_lines:
-            post_lines.append(
-                '𝗣𝗲𝗮𝗸 𝗜𝗻𝘁𝗲𝗻𝘀𝗶𝘁𝘆'
-            )
-            post_lines.extend(
-                peak_lines[:3]
+            sections.append(
+                '𝗣𝗲𝗮𝗸 𝗜𝗻𝘁𝗲𝗻𝘀𝗶𝘁𝘆\n'
+                +
+                '\n'.join(
+                    peak_lines[:3]
+                )
             )
         elif hazards:
-            post_lines.append(
-                'Hazards: ' + ', '.join(hazards)
+            sections.append(
+                'Hazards\n'
+                +
+                ', '.join(hazards)
             )
 
         return RenderedPost(
-            fit_post(
-                post_lines,
+            fit_post_sections(
+                sections,
                 item.link,
             ),
             image_path,
@@ -11262,33 +11322,43 @@ def render_spc(
                 'image could not be rendered'
             )
 
-        post_lines: list[str] = [
+        header_lines: list[str] = [
             product_name,
         ]
+
         if location:
-            post_lines.append(
+            header_lines.append(
                 truncate(location, 120)
             )
 
         verb = 'Updated' if is_update else 'Issued'
         if issued:
-            post_lines.append(
+            header_lines.append(
                 f'{verb} {issued}'
             )
         if expires:
-            post_lines.append(
+            header_lines.append(
                 f'Expires {expires}'
             )
 
-        post_lines.extend(
-            watch_probability_lines(
-                probabilities
-            )
+        likelihood_lines = watch_probability_lines(
+            probabilities
         )
 
+        sections: list[str] = [
+            '\n'.join(header_lines),
+        ]
+
+        if likelihood_lines:
+            sections.append(
+                'Likelihoods\n'
+                +
+                '\n'.join(likelihood_lines)
+            )
+
         return RenderedPost(
-            fit_post(
-                post_lines,
+            fit_post_sections(
+                sections,
                 item.link,
             ),
             image_path,

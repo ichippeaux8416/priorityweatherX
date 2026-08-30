@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-28-spc-raw-nhc-pretty-cone-v8.16'
+BUILD_ID = '2026-08-29-clean-spc-lines-nhc-cone-v8.17'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -6493,6 +6493,21 @@ def spc_convective_logical_key(
     )
 
     raw = item.multiline_text
+    cycle = spc_outlook_cycle_z(
+        item,
+        day,
+        raw,
+    )
+    valid_start = spc_outlook_valid_start(
+        raw,
+        item.published,
+    )
+
+    if cycle and valid_start is not None:
+        return sha256_text(
+            f'day{day}|cycle|'
+            f'{valid_start:%Y%m%d}|{cycle}'
+        )
 
     issued = spc_product_issuance_datetime(
         raw,
@@ -6505,9 +6520,9 @@ def spc_convective_logical_key(
         )
 
     valid_match = re.search(
-        r'(?i)VALID\s+'
+        r'(?i)\bVALID\s+'
         r'(\d{6})Z\s*[-–]\s*'
-        r'(\d{6})Z',
+        r'(\d{6})Z\b',
         raw,
     )
 
@@ -8380,9 +8395,15 @@ def build_mapbox_spc_fire_map(
         product
     )
 
-    # Fire Weather maps already sit cleanly on the Mapbox basemap.  Drawing a
-    # second custom state-boundary dataset on top causes visible misalignment
-    # on this product family, so rely on the basemap's own state lines here.
+    base = add_reference_boundaries(
+        base,
+        bbox,
+        counties=False,
+        states=True,
+        state_halo_width=5,
+        state_line_width=3,
+    )
+
     return save_map_image(
         base,
         prefix=f'spc_fire_day{day}_',
@@ -8504,6 +8525,17 @@ def build_mapbox_wpc_winter_map(
         bbox,
         width,
         height,
+    )
+
+    base = ImageEnhance.Contrast(
+        base
+    ).enhance(
+        0.86
+    )
+    base = ImageEnhance.Brightness(
+        base
+    ).enhance(
+        1.035
     )
 
     product = export_map_image(
@@ -10143,6 +10175,65 @@ def watch_probability_summary(
     )
 
 
+
+def watch_probability_lines(
+    probabilities: WatchProbabilities,
+) -> list[str]:
+    return [
+        (
+            'Tornadoes: '
+            f'{watch_probability_level(probabilities.tornadoes)}'
+            ' | EF2+: '
+            f'{watch_probability_level(probabilities.strong_tornadoes)}'
+        ),
+        (
+            'Wind: '
+            f'{watch_probability_level(probabilities.severe_wind)}'
+            ' | 65+ kt: '
+            f'{watch_probability_level(probabilities.significant_wind)}'
+        ),
+        (
+            'Hail: '
+            f'{watch_probability_level(probabilities.severe_hail)}'
+            ' | 2+ in: '
+            f'{watch_probability_level(probabilities.significant_hail)}'
+        ),
+    ]
+
+
+def spc_md_peak_intensity_lines(
+    text: str,
+) -> list[str]:
+    patterns: dict[str, tuple[str, ...]] = {
+        'Tornado': (
+            r'(?im)^\s*(?:MOST\s+PROBABLE\s+PEAK\s+)?TORNADO(?:\s+INTENSITY)?\s*(?:\.\.\.|:)\s*([^\n]+)',
+            r'(?im)^\s*TORNADO\s*:\s*([^\n]+)',
+        ),
+        'Wind': (
+            r'(?im)^\s*(?:MOST\s+PROBABLE\s+PEAK\s+)?WIND(?:\s+GUST)?(?:\s+INTENSITY)?\s*(?:\.\.\.|:)\s*([^\n]+)',
+            r'(?im)^\s*WIND\s*:\s*([^\n]+)',
+        ),
+        'Hail': (
+            r'(?im)^\s*(?:MOST\s+PROBABLE\s+PEAK\s+)?HAIL(?:\s+SIZE)?(?:\s+INTENSITY)?\s*(?:\.\.\.|:)\s*([^\n]+)',
+            r'(?im)^\s*HAIL\s*:\s*([^\n]+)',
+        ),
+    }
+
+    lines: list[str] = []
+    for label, variants in patterns.items():
+        value = ''
+        for pattern in variants:
+            match = re.search(pattern, text)
+            if match:
+                value = squish(match.group(1)).strip(' .;:-')
+                break
+        if not value:
+            continue
+        if value.lower() in {'none', 'n/a', 'na', 'not expected'}:
+            value = 'N/A'
+        lines.append(f'{label}: {truncate(value, 44)}')
+    return lines
+
 def arcgis_datetime(
     value: Any,
 ) -> Optional[
@@ -10840,35 +10931,6 @@ def render_spc(
         )
 
     if kind == 'md':
-        concerning = spc_field(
-            page_text,
-            'Concerning',
-        )
-
-        if concerning:
-            details.append(
-                'Concerning: '
-                +
-                truncate(
-                    concerning,
-                    140,
-                )
-            )
-
-        probability = re.search(
-            r'Probability of Watch Issuance'
-            r'\s*\.{3}\s*'
-            r'(\d+)\s*percent',
-            page_text,
-            re.I,
-        )
-
-        if probability:
-            details.append(
-                f'Watch probability: '
-                f'{probability.group(1)}%'
-            )
-
         direct_geometry = spc_latlon_polygon_geometry(
             page_text
         )
@@ -10876,25 +10938,19 @@ def render_spc(
         if direct_geometry:
             match = SPCGeometryMatch(
                 {
-                    'name':
-                        number,
-                    'source':
-                        'official_product_latlon',
+                    'name': number,
+                    'source': 'official_product_latlon',
                 },
                 direct_geometry,
             )
-
         else:
-            # GIS is only a fallback now; it is no longer allowed to delay
-            # an MCD that already contains its official LAT...LON polygon.
             match = find_matching_mcd_feature(
                 number
             )
 
         if not match:
             raise RetryableSourceDataError(
-                f'MCD '
-                f'{number or product_name} '
+                f'MCD {number or product_name} '
                 'had no usable LAT...LON polygon or GIS fallback'
             )
 
@@ -10903,19 +10959,73 @@ def render_spc(
             item.published,
         )
 
-        image_path = (
-            build_mcd_image(
-                match,
-                md_issued_at,
-            )
+        image_path = build_mcd_image(
+            match,
+            md_issued_at,
         )
 
         if not image_path:
             raise RetryableSourceDataError(
-                f'MCD '
-                f'{number or product_name} '
+                f'MCD {number or product_name} '
                 'image could not be rendered'
             )
+
+        probability = re.search(
+            r'Probability of Watch Issuance\s*\.{3}\s*(\d+)\s*percent',
+            page_text,
+            re.I,
+        )
+        hazards = extract_hazards(
+            page_text,
+            product_name,
+        )
+        peak_lines = spc_md_peak_intensity_lines(
+            page_text
+        )
+
+        post_lines: list[str] = [
+            product_name,
+        ]
+        if issued:
+            post_lines.append(
+                f'Issued {issued}'
+            )
+        elif item.published:
+            post_lines.append(
+                'Issued '
+                + item.published.strftime('%-I:%M %p UTC')
+            )
+
+        if location and location.strip().lower() != 'united states':
+            post_lines.append(
+                truncate(location, 115)
+            )
+
+        if probability:
+            post_lines.append(
+                'Chance of watch issuance: '
+                f'{probability.group(1)}%'
+            )
+
+        if peak_lines:
+            post_lines.append(
+                '𝗣𝗲𝗮𝗸 𝗜𝗻𝘁𝗲𝗻𝘀𝗶𝘁𝘆'
+            )
+            post_lines.extend(
+                peak_lines[:3]
+            )
+        elif hazards:
+            post_lines.append(
+                'Hazards: ' + ', '.join(hazards)
+            )
+
+        return RenderedPost(
+            fit_post(
+                post_lines,
+                item.link,
+            ),
+            image_path,
+        )
 
     elif kind == 'watch':
         # Use the original fast SAW polygon first.  The WOU is separately
@@ -11148,10 +11258,41 @@ def render_spc(
 
         if not image_path:
             raise RetryableSourceDataError(
-                f'Watch '
-                f'{number or product_name} '
+                f'Watch {number or product_name} '
                 'image could not be rendered'
             )
+
+        post_lines: list[str] = [
+            product_name,
+        ]
+        if location:
+            post_lines.append(
+                truncate(location, 120)
+            )
+
+        verb = 'Updated' if is_update else 'Issued'
+        if issued:
+            post_lines.append(
+                f'{verb} {issued}'
+            )
+        if expires:
+            post_lines.append(
+                f'Expires {expires}'
+            )
+
+        post_lines.extend(
+            watch_probability_lines(
+                probabilities
+            )
+        )
+
+        return RenderedPost(
+            fit_post(
+                post_lines,
+                item.link,
+            ),
+            image_path,
+        )
 
     elif (
         soup
@@ -11247,7 +11388,7 @@ def poll_spc_convective_source(
         )
 
     state_source = (
-        f'{source}:logical_cycle_v816'
+        f'{source}:logical_cycle_v817'
     )
 
     by_key: dict[
@@ -14938,9 +15079,14 @@ def nhc_select_forecast_group(
             '',
         )
 
-    current_lon, current_lat = nhc_lonlat_from_text(
-        item.multiline_text
+    current_lon, current_lat = nhc_current_point_from_forecast_points(
+        forecast_points
     )
+
+    if current_lon is None or current_lat is None:
+        current_lon, current_lat = nhc_lonlat_from_text(
+            item.multiline_text
+        )
 
     wanted_name = nhc_normalized_storm_token(
         storm_name
@@ -15871,7 +16017,7 @@ def nhc_issue_timezone_abbreviation(
     )
 
     match = re.search(
-        r'([A-Z]{2,5})$',
+        r'\b([A-Z]{2,5})$',
         issued,
     )
 
@@ -16024,6 +16170,40 @@ def nhc_marker_symbol(
     return 'M'
 
 
+def nhc_current_point_from_forecast_points(
+    forecast_points: list[dict[str, Any]],
+) -> tuple[Optional[float], Optional[float]]:
+    selected: Optional[dict[str, Any]] = None
+    selected_tau = 10 ** 9
+
+    for index, feature in enumerate(forecast_points):
+        geometry = feature.get('geometry') or {}
+        try:
+            float(geometry['x'])
+            float(geometry['y'])
+        except Exception:
+            continue
+        tau = nhc_forecast_tau(feature, index)
+        if tau < selected_tau:
+            selected = feature
+            selected_tau = tau
+
+    if selected is None:
+        return (None, None)
+
+    geometry = selected.get('geometry') or {}
+    try:
+        point_x = float(geometry['x'])
+        point_y = float(geometry['y'])
+    except Exception:
+        return (None, None)
+
+    return web_mercator_to_lonlat(
+        point_x,
+        point_y,
+    )
+
+
 def nhc_draw_current_x(
     draw: ImageDraw.ImageDraw,
     px: int,
@@ -16124,66 +16304,25 @@ def nhc_draw_clean_forecast_labels(
     reference_time: Optional[datetime],
     clock_abbreviation: str,
 ) -> Image.Image:
-    out = image.copy().convert(
-        'RGBA'
-    )
-
-    draw = ImageDraw.Draw(
-        out,
-        'RGBA',
-    )
-
-    font = load_font(
-        20,
-        True,
-    )
-    marker_font = load_font(
-        16,
-        True,
-    )
+    out = image.copy().convert('RGBA')
+    draw = ImageDraw.Draw(out, 'RGBA')
+    font = load_font(22, True)
+    marker_font = load_font(16, True)
 
     by_tau: dict[int, dict[str, Any]] = {}
-
-    for index, feature in enumerate(
-        forecast_points
-    ):
-        tau = nhc_forecast_tau(
-            feature,
-            index,
-        )
-
-        if tau not in {
-            0,
-            12,
-            24,
-            36,
-            48,
-            72,
-            96,
-            120,
-        }:
+    for index, feature in enumerate(forecast_points):
+        tau = nhc_forecast_tau(feature, index)
+        if tau not in {0, 12, 24, 36, 48, 72, 96, 120}:
             continue
-
-        existing = by_tau.get(
-            tau
-        )
-
-        if existing is None:
-            by_tau[tau] = feature
-            continue
-
-        existing_time = nhc_feature_latest_time([existing])
-        candidate_time = nhc_feature_latest_time([feature])
-        if candidate_time >= existing_time:
+        existing = by_tau.get(tau)
+        if existing is None or nhc_feature_latest_time([feature]) >= nhc_feature_latest_time([existing]):
             by_tau[tau] = feature
 
     nodes: list[dict[str, Any]] = []
-
     for tau in sorted(by_tau):
         feature = by_tau[tau]
         attrs = feature.get('attributes') or {}
         geometry = feature.get('geometry') or {}
-
         if tau == 0 and current_lon is not None and current_lat is not None:
             point_x, point_y = lonlat_to_web_mercator(current_lon, current_lat)
         else:
@@ -16194,16 +16333,14 @@ def nhc_draw_clean_forecast_labels(
                 continue
 
         px, py = nhc_point_pixel_from_mercator(
-            point_x,
-            point_y,
-            bbox,
-            out.width,
-            out.height,
+            point_x, point_y, bbox, out.width, out.height,
         )
-
-        wind_mph = current_wind_mph if tau == 0 and current_wind_mph is not None else nhc_knots_to_mph(attrs.get('maxwind'))
+        wind_mph = (
+            current_wind_mph
+            if tau == 0 and current_wind_mph is not None
+            else nhc_knots_to_mph(attrs.get('maxwind'))
+        )
         valid_time = nhc_guess_forecast_datetime(feature, reference_time)
-
         label_lines: list[str] = []
         if tau == 0:
             label_lines.append('NOW')
@@ -16214,40 +16351,33 @@ def nhc_draw_clean_forecast_labels(
             label_lines.append(f'+{tau}h')
         if wind_mph is not None:
             label_lines.append(f'{wind_mph} mph')
-        if not label_lines:
-            continue
+        if label_lines:
+            nodes.append({
+                'tau': tau,
+                'px': px,
+                'py': py,
+                'wind_mph': wind_mph,
+                'label': '\n'.join(label_lines),
+                'current': tau == 0,
+            })
 
-        nodes.append({
-            'tau': tau,
-            'px': px,
-            'py': py,
-            'wind_mph': wind_mph,
-            'label': '\n'.join(label_lines),
-            'current': tau == 0,
-        })
-
-    occupied: list[tuple[int, int, int, int]] = []
+    occupied: list[tuple[int, int, int, int]] = [
+        (int(n['px']) - 24, int(n['py']) - 24, int(n['px']) + 24, int(n['py']) + 24)
+        for n in nodes
+    ]
 
     for index, node in enumerate(nodes):
         px = int(node['px'])
         py = int(node['py'])
         label = str(node['label'])
-
-        text_box = draw.multiline_textbbox(
-            (0, 0),
-            label,
-            font=font,
-            spacing=1,
-            align='center',
-            stroke_width=4,
+        tb = draw.multiline_textbbox(
+            (0, 0), label, font=font, spacing=2, align='center', stroke_width=5,
         )
-        text_width = text_box[2] - text_box[0]
-        text_height = text_box[3] - text_box[1]
-        box_width = text_width + 12
-        box_height = text_height + 8
+        bw = tb[2] - tb[0] + 14
+        bh = tb[3] - tb[1] + 10
 
         if len(nodes) == 1:
-            vx, vy = 0.0, -1.0
+            vx, vy = 1.0, 0.0
         elif index == 0:
             vx = float(nodes[1]['px'] - px)
             vy = float(nodes[1]['py'] - py)
@@ -16257,56 +16387,69 @@ def nhc_draw_clean_forecast_labels(
         else:
             vx = float(nodes[index + 1]['px'] - nodes[index - 1]['px'])
             vy = float(nodes[index + 1]['py'] - nodes[index - 1]['py'])
-
         length = max(math.hypot(vx, vy), 1.0)
         vx /= length
         vy /= length
-        if index % 2 == 0:
-            nx, ny = -vy, vx
-        else:
-            nx, ny = vy, -vx
+        nx, ny = -vy, vx
+        preferred = -1 if index % 2 == 0 else 1
 
         candidates: list[tuple[int, int]] = []
-        for distance in (60, 80, 100):
-            candidates.append((int(round(px + nx * distance)), int(round(py + ny * distance))))
-        for distance in (60, 80):
-            candidates.append((int(round(px - nx * distance)), int(round(py - ny * distance))))
-        for tx in (34, -34):
-            candidates.append((px + tx, py - 46))
-            candidates.append((px + tx, py + 46))
+        for sign in (preferred, -preferred):
+            for distance in (100, 128, 156, 184):
+                for along in (-22, 0, 22):
+                    candidates.append((
+                        int(round(px + nx * distance * sign + vx * along)),
+                        int(round(py + ny * distance * sign + vy * along)),
+                    ))
 
         chosen = None
-        for center_x, center_y in candidates:
-            left = max(8, min(out.width - box_width - 8, center_x - box_width // 2))
-            top = max(8, min(out.height - box_height - 8, center_y - box_height // 2))
-            rect = (int(left), int(top), int(left + box_width), int(top + box_height))
-            if any(nhc_rects_intersect(rect, other, padding=12) for other in occupied):
+        for cx, cy in candidates:
+            left = max(8, min(out.width - bw - 8, cx - bw // 2))
+            top = max(8, min(out.height - bh - 8, cy - bh // 2))
+            rect = (int(left), int(top), int(left + bw), int(top + bh))
+            if any(nhc_rects_intersect(rect, other, padding=18) for other in occupied):
                 continue
             chosen = rect
             break
 
-        if chosen is not None:
-            occupied.append(chosen)
-            anchor_x = max(chosen[0] + 6, min(px, chosen[2] - 6))
-            anchor_y = chosen[3] - 2 if chosen[3] < py else chosen[1] + 2 if chosen[1] > py else py
-            draw.line((px, py, anchor_x, anchor_y), fill=(255, 255, 255, 250), width=6)
-            draw.line((px, py, anchor_x, anchor_y), fill=(18, 24, 32, 255), width=2)
-            draw.multiline_text(
-                ((chosen[0] + chosen[2]) / 2, chosen[1]),
-                label,
-                font=font,
-                fill=(18, 24, 32, 255),
-                stroke_width=4,
-                stroke_fill=(255, 255, 255, 250),
-                spacing=1,
-                anchor='ma',
-                align='center',
-            )
+        if chosen is None:
+            # Deterministic far-side fallback; still much farther from the track than v8.16.
+            sign = preferred
+            cx = int(round(px + nx * 198 * sign))
+            cy = int(round(py + ny * 198 * sign))
+            left = max(8, min(out.width - bw - 8, cx - bw // 2))
+            top = max(8, min(out.height - bh - 8, cy - bh // 2))
+            chosen = (int(left), int(top), int(left + bw), int(top + bh))
+
+        occupied.append(chosen)
+        left, top, right, bottom = chosen
+        anchors = [
+            (max(left + 8, min(px, right - 8)), bottom - 3),
+            (max(left + 8, min(px, right - 8)), top + 3),
+            (right - 3, max(top + 8, min(py, bottom - 8))),
+            (left + 3, max(top + 8, min(py, bottom - 8))),
+        ]
+        ax, ay = min(anchors, key=lambda pt: (pt[0]-px)**2 + (pt[1]-py)**2)
+        draw.line((px, py, ax, ay), fill=(255, 255, 255, 250), width=7)
+        draw.line((px, py, ax, ay), fill=(18, 24, 32, 255), width=2)
+        draw.multiline_text(
+            ((left + right) / 2, top),
+            label,
+            font=font,
+            fill=(18, 24, 32, 255),
+            stroke_width=5,
+            stroke_fill=(255, 255, 255, 250),
+            spacing=2,
+            anchor='ma',
+            align='center',
+        )
 
         if node['current']:
             nhc_draw_current_x(draw, px, py)
         else:
-            nhc_draw_forecast_marker(draw, px, py, nhc_marker_symbol(node['wind_mph']), marker_font)
+            nhc_draw_forecast_marker(
+                draw, px, py, nhc_marker_symbol(node['wind_mph']), marker_font,
+            )
 
     return out
 
@@ -16438,9 +16581,9 @@ def build_mapbox_nhc_storm_map(
         map_points,
         width,
         height,
-        padding_factor=1.08,
-        min_width_m=1300000.0,
-        min_height_m=620000.0,
+        padding_factor=1.18,
+        min_width_m=1500000.0,
+        min_height_m=720000.0,
     )
 
     base = fetch_mapbox_light_base(

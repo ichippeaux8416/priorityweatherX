@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-30-spc-strict-live-cycle-v8.22'
+BUILD_ID = '2026-08-30-spc-strict-live-cycle-v8.23'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -3025,6 +3025,13 @@ def export_map_image(
     height: int,
     *,
     layers: str = '',
+    layer_defs: Optional[
+        dict[
+            int,
+            str,
+        ]
+    ] = None,
+    fresh: bool = False,
 ) -> Image.Image:
     params: dict[
         str,
@@ -3061,13 +3068,50 @@ def export_map_image(
             'layers'
         ] = layers
 
+    if layer_defs:
+        params[
+            'layerDefs'
+        ] = json.dumps(
+            {
+                str(layer_id):
+                    definition
+                for layer_id, definition
+                in layer_defs.items()
+            },
+            separators=(
+                ',',
+                ':',
+            ),
+        )
+
+    headers = {
+        'Accept':
+            'image/png,*/*'
+    }
+
+    if fresh:
+        params[
+            '_pw'
+        ] = str(
+            int(
+                time.time()
+                *
+                1000
+            )
+        )
+        headers.update(
+            {
+                'Cache-Control':
+                    'no-cache, no-store, max-age=0',
+                'Pragma':
+                    'no-cache',
+            }
+        )
+
     response = http_get(
         url,
         params=params,
-        headers={
-            'Accept':
-                'image/png,*/*'
-        },
+        headers=headers,
         timeout=(
             8,
             45,
@@ -4895,6 +4939,7 @@ def arcgis_query_features(
     return_geometry: bool = False,
     order_by: str = '',
     out_sr: Optional[int] = None,
+    fresh: bool = False,
 ) -> list[
     dict[
         str,
@@ -4944,6 +4989,13 @@ def arcgis_query_features(
     ] = []
 
     offset = 0
+    request_nonce = str(
+        int(
+            time.time()
+            *
+            1000
+        )
+    )
 
     while True:
         page_params = dict(
@@ -4958,14 +5010,38 @@ def arcgis_query_features(
             'resultRecordCount'
         ] = 2000
 
+        if fresh:
+            # NOAA's ArcGIS endpoints can sit behind intermediary caches.
+            # Outlook issuance matching is safety-critical, so force a unique
+            # URL and explicitly bypass cache whenever the caller asks for a
+            # live snapshot.
+            page_params[
+                '_pw'
+            ] = (
+                f'{request_nonce}-'
+                f'{offset}'
+            )
+
+        headers = {
+            'Accept':
+                'application/json'
+        }
+
+        if fresh:
+            headers.update(
+                {
+                    'Cache-Control':
+                        'no-cache, no-store, max-age=0',
+                    'Pragma':
+                        'no-cache',
+                }
+            )
+
         response = http_get(
             f'{mapserver}/'
             f'{layer}/query',
             params=page_params,
-            headers={
-                'Accept':
-                    'application/json'
-            },
+            headers=headers,
             timeout=(
                 8,
                 40,
@@ -6533,6 +6609,517 @@ def spc_filter_features_for_valid(
     return matched
 
 
+def spc_nominal_gis_cycle_datetime(
+    day: int,
+    issued: datetime,
+) -> datetime:
+    issued = issued.astimezone(
+        timezone.utc
+    ).replace(
+        second=0,
+        microsecond=0,
+    )
+
+    schedules = SPC_CONVECTIVE_SCHEDULE_MINUTES.get(
+        day
+    )
+
+    if not schedules:
+        return issued
+
+    midnight = issued.replace(
+        hour=0,
+        minute=0,
+    )
+
+    candidates = [
+        midnight
+        +
+        timedelta(
+            days=day_offset,
+            minutes=scheduled,
+        )
+        for day_offset
+        in (
+            -1,
+            0,
+            1,
+        )
+        for scheduled
+        in schedules
+    ]
+
+    return min(
+        candidates,
+        key=lambda candidate:
+            abs(
+                (
+                    candidate
+                    -
+                    issued
+                ).total_seconds()
+            ),
+    )
+
+
+def spc_feature_source_cycle(
+    feature: dict[str, Any],
+) -> Optional[
+    tuple[
+        int,
+        datetime,
+        str,
+    ]
+]:
+    attrs = (
+        feature.get(
+            'attributes'
+        )
+        or
+        {}
+    )
+
+    source = squish(
+        str(
+            attrs.get(
+                'idp_source'
+            )
+            or
+            ''
+        )
+    )
+
+    match = re.search(
+        r'(?i)\bday([1-8])otlk_'
+        r'(\d{8})_'
+        r'(\d{4})'
+        r'(?:_|\b)',
+        source,
+    )
+
+    if not match:
+        return None
+
+    try:
+        cycle = datetime.strptime(
+            (
+                match.group(
+                    2
+                )
+                +
+                match.group(
+                    3
+                )
+            ),
+            '%Y%m%d%H%M',
+        ).replace(
+            tzinfo=timezone.utc
+        )
+
+    except ValueError:
+        return None
+
+    return (
+        int(
+            match.group(
+                1
+            )
+        ),
+        cycle,
+        source,
+    )
+
+
+def spc_feature_issue_datetime(
+    feature: dict[str, Any],
+) -> Optional[datetime]:
+    attrs = (
+        feature.get(
+            'attributes'
+        )
+        or
+        {}
+    )
+
+    for key in (
+        'issue',
+        'issue_iso',
+    ):
+        dt = spc_arcgis_datetime(
+            attrs.get(
+                key
+            )
+        )
+
+        if dt is not None:
+            return dt
+
+    return None
+
+
+def spc_feature_freshness_datetime(
+    feature: dict[str, Any],
+) -> Optional[datetime]:
+    attrs = (
+        feature.get(
+            'attributes'
+        )
+        or
+        {}
+    )
+
+    parsed = [
+        arcgis_datetime(
+            attrs.get(
+                key
+            )
+        )
+        for key
+        in (
+            'idp_filedate',
+            'idp_ingestdate',
+        )
+    ]
+
+    parsed = [
+        dt
+        for dt
+        in parsed
+        if dt is not None
+    ]
+
+    if not parsed:
+        return None
+
+    return max(
+        parsed
+    )
+
+
+def spc_filter_features_for_issuance(
+    features: list[dict[str, Any]],
+    expected_issued: Optional[datetime],
+    *,
+    day: int,
+    layer_name: str,
+) -> list[dict[str, Any]]:
+    """Return only GIS features belonging to the detected SPC issuance.
+
+    Day 2 is the critical case: both the 0600Z and 1730Z cycles normally
+    share the same VALID time.  Matching VALID alone therefore accepts the
+    morning polygons after the afternoon text has already updated.  The
+    NOAA/IDP ``idp_source`` field carries the outlook cycle explicitly (for
+    example ``day2otlk_20260830_1730_cat``), so that is the primary gate.
+
+    If NOAA ever changes that naming convention, ``issue`` and IDP file/
+    ingest timestamps provide conservative fallbacks.  Every fallback is
+    fail-closed: an unverifiable layer is deferred, never posted as current.
+    """
+    if not features:
+        return []
+
+    if expected_issued is None:
+        raise RetryableSourceDataError(
+            f'SPC Day {day} {layer_name} cannot be '
+            'cycle-verified because the source product '
+            'has no authoritative issuance timestamp'
+        )
+
+    expected_issued = expected_issued.astimezone(
+        timezone.utc
+    ).replace(
+        second=0,
+        microsecond=0,
+    )
+
+    expected_cycle = spc_nominal_gis_cycle_datetime(
+        day,
+        expected_issued,
+    )
+
+    source_rows: list[
+        tuple[
+            dict[str, Any],
+            int,
+            datetime,
+            str,
+        ]
+    ] = []
+
+    for feature in features:
+        parsed = spc_feature_source_cycle(
+            feature
+        )
+
+        if parsed is None:
+            continue
+
+        source_day, source_cycle, source = parsed
+        source_rows.append(
+            (
+                feature,
+                source_day,
+                source_cycle,
+                source,
+            )
+        )
+
+    if source_rows:
+        matched = [
+            feature
+            for (
+                feature,
+                source_day,
+                source_cycle,
+                _source,
+            )
+            in source_rows
+            if (
+                source_day == day
+                and
+                abs(
+                    source_cycle
+                    -
+                    expected_cycle
+                )
+                <=
+                timedelta(
+                    minutes=2
+                )
+            )
+        ]
+
+        mismatched_sources = sorted(
+            {
+                source
+                for (
+                    _feature,
+                    source_day,
+                    source_cycle,
+                    source,
+                )
+                in source_rows
+                if (
+                    source_day != day
+                    or
+                    abs(
+                        source_cycle
+                        -
+                        expected_cycle
+                    )
+                    >
+                    timedelta(
+                        minutes=2
+                    )
+                )
+            }
+        )
+
+        if matched and not mismatched_sources:
+            return matched
+
+        if matched and mismatched_sources:
+            # ArcGIS can be observed while an IDP layer is being replaced.
+            # Seeing even one polygon from the prior source means this is a
+            # mixed/partial refresh, not an atomic current outlook yet.
+            raise RetryableSourceDataError(
+                f'SPC Day {day} {layer_name} GIS layer '
+                'is mid-refresh with mixed source cycles; '
+                f'current target {expected_cycle:%Y%m%d_%H%M}, '
+                f'stale sources {mismatched_sources!r}'
+            )
+
+        newest = max(
+            source_rows,
+            key=lambda row:
+                row[2]
+        )
+
+        raise RetryableSourceDataError(
+            f'SPC Day {day} {layer_name} GIS layer '
+            f'is still on source {newest[3]}; waiting '
+            f'for cycle {expected_cycle:%Y%m%d_%H%M}'
+        )
+
+    issue_rows = [
+        (
+            feature,
+            spc_feature_issue_datetime(
+                feature
+            ),
+        )
+        for feature
+        in features
+    ]
+
+    issue_rows = [
+        (
+            feature,
+            issue
+        )
+        for feature, issue
+        in issue_rows
+        if issue is not None
+    ]
+
+    if issue_rows:
+        # This is only a fallback if NOAA ever stops exposing the normal
+        # idp_source naming convention.  Keep it tight: a source more than
+        # ~20 minutes from the detected SPC issuance is not proven current.
+        tolerance = timedelta(
+            minutes=20
+        )
+
+        matched = [
+            feature
+            for feature, issue
+            in issue_rows
+            if min(
+                abs(
+                    issue
+                    -
+                    expected_issued
+                ),
+                abs(
+                    issue
+                    -
+                    expected_cycle
+                ),
+            )
+            <=
+            tolerance
+        ]
+
+        if matched:
+            return matched
+
+        newest_issue = max(
+            issue
+            for _feature, issue
+            in issue_rows
+        )
+
+        raise RetryableSourceDataError(
+            f'SPC Day {day} {layer_name} GIS layer '
+            f'is still on issue {newest_issue:%Y%m%d %H%MZ}; '
+            f'waiting for {expected_issued:%Y%m%d %H%MZ}'
+        )
+
+    freshness_rows = [
+        (
+            feature,
+            spc_feature_freshness_datetime(
+                feature
+            ),
+        )
+        for feature
+        in features
+    ]
+
+    freshness_rows = [
+        (
+            feature,
+            freshness
+        )
+        for feature, freshness
+        in freshness_rows
+        if freshness is not None
+    ]
+
+    if freshness_rows:
+        earliest_current = (
+            expected_issued
+            -
+            timedelta(
+                minutes=20
+            )
+        )
+
+        matched = [
+            feature
+            for feature, freshness
+            in freshness_rows
+            if freshness >= earliest_current
+        ]
+
+        if matched:
+            return matched
+
+        newest_freshness = max(
+            freshness
+            for _feature, freshness
+            in freshness_rows
+        )
+
+        raise RetryableSourceDataError(
+            f'SPC Day {day} {layer_name} GIS layer '
+            f'has not refreshed for the new issuance; '
+            f'newest IDP timestamp is '
+            f'{newest_freshness:%Y%m%d %H%MZ}'
+        )
+
+    raise RetryableSourceDataError(
+        f'SPC Day {day} {layer_name} GIS layer '
+        'has no verifiable cycle/source timestamp; '
+        'refusing to post an unverified outlook'
+    )
+
+
+def spc_single_feature_source(
+    features: list[dict[str, Any]],
+    *,
+    day: int,
+    layer_name: str,
+) -> str:
+    sources = sorted(
+        {
+            squish(
+                str(
+                    (
+                        feature.get(
+                            'attributes'
+                        )
+                        or
+                        {}
+                    ).get(
+                        'idp_source'
+                    )
+                    or
+                    ''
+                )
+            )
+            for feature
+            in features
+            if squish(
+                str(
+                    (
+                        feature.get(
+                            'attributes'
+                        )
+                        or
+                        {}
+                    ).get(
+                        'idp_source'
+                    )
+                    or
+                    ''
+                )
+            )
+        }
+    )
+
+    if len(
+        sources
+    ) != 1:
+        raise RetryableSourceDataError(
+            f'SPC Day {day} {layer_name} GIS layer '
+            f'did not resolve to one exact IDP source: '
+            f'{sources!r}'
+        )
+
+    return sources[0]
+
+
 def spc_convective_logical_key(
     item: RSSItem,
 ) -> str:
@@ -6541,6 +7128,21 @@ def spc_convective_logical_key(
     )
 
     raw = item.multiline_text
+
+    # The actual WMO/SPC issuance stamp is the identity of the product.  Do
+    # not collapse it to the nominal 1300/1630/1730 cycle: SPC can publish a
+    # few minutes early and can also issue a corrected product inside the same
+    # nominal cycle.
+    issued = spc_strict_product_issuance_datetime(
+        raw,
+        item.published,
+    )
+
+    if issued is not None:
+        return sha256_text(
+            f'day{day}|issued|{issued:%Y%m%d%H%M}'
+        )
+
     cycle = spc_outlook_cycle_z(
         item,
         day,
@@ -6555,16 +7157,6 @@ def spc_convective_logical_key(
         return sha256_text(
             f'day{day}|cycle|'
             f'{valid_start:%Y%m%d}|{cycle}'
-        )
-
-    issued = spc_strict_product_issuance_datetime(
-        raw,
-        item.published,
-    )
-
-    if issued is not None:
-        return sha256_text(
-            f'day{day}|issued|{issued:%Y%m%d%H%M}'
         )
 
     valid_match = re.search(
@@ -6627,10 +7219,12 @@ def spc_strict_product_issuance_datetime(
     text: str,
     reference: Optional[datetime],
 ) -> Optional[datetime]:
-    # Raw NWS WMO header.  This is the most authoritative publication stamp.
+    # Convective outlooks carry an internal ``SPC AC DDHHMM`` timestamp.
+    # This is the issuance clock SPC displays on the outlook itself (and it
+    # can precede the WMO dissemination header by a minute or two), so prefer
+    # it whenever present.
     match = re.search(
-        r'(?im)^\s*'
-        r'[A-Z]{4}\d{2}\s+KWNS\s+'
+        r'(?im)^\s*SPC\s+AC\s+'
         r'(\d{6})\b',
         text,
     )
@@ -6646,11 +7240,11 @@ def spc_strict_product_issuance_datetime(
         if resolved is not None:
             return resolved
 
-    # SPC outlook products also carry an internal ``SPC AC DDHHMM`` stamp.
-    # The live HTML page can expose this before every surrounding header is
-    # present, so accept it as a second authoritative issuance clock.
+    # Raw NWS WMO header is the authoritative fallback if the internal SPC
+    # issue stamp has not appeared in the snapshot yet.
     match = re.search(
-        r'(?im)^\s*SPC\s+AC\s+'
+        r'(?im)^\s*'
+        r'[A-Z]{4}\d{2}\s+KWNS\s+'
         r'(\d{6})\b',
         text,
     )
@@ -8540,6 +9134,8 @@ def build_mapbox_spc_outlook_map(
             Any,
         ]
     ],
+    *,
+    exact_idp_source: str = '',
 ) -> str:
     width = 1200
     height = 760
@@ -8614,6 +9210,28 @@ def build_mapbox_spc_outlook_map(
         height,
     )
 
+    layer_defs: Optional[
+        dict[
+            int,
+            str,
+        ]
+    ] = None
+
+    if exact_idp_source:
+        # Render the SAME verified feature source we queried above.  Without
+        # this layer definition, /export can render whatever cycle happens to
+        # be current at export time, which breaks the atomic text+map promise.
+        layer_defs = {
+            image_layer:
+                (
+                    'idp_source = '
+                    +
+                    sql_quote(
+                        exact_idp_source
+                    )
+                )
+        }
+
     product = export_map_image(
         f'{SPC_OUTLOOK_MAPSERVER}/export',
         bbox,
@@ -8621,7 +9239,34 @@ def build_mapbox_spc_outlook_map(
         height,
         layers=
             f'show:{image_layer}',
+        layer_defs=
+            layer_defs,
+        fresh=True,
     )
+
+    if exact_idp_source:
+        # A definition-filtered export should contain at least one rendered
+        # polygon.  If the source vanished between QUERY and EXPORT (or the
+        # server ignored/failed the filter), a transparent image must never be
+        # promoted into a supposedly current outlook post.
+        alpha = (
+            product.getchannel(
+                'A'
+            )
+            if 'A' in product.getbands()
+            else None
+        )
+
+        if (
+            alpha is not None
+            and
+            alpha.getbbox() is None
+        ):
+            raise RetryableSourceDataError(
+                f'SPC Day {day} exact GIS source '
+                f'{exact_idp_source} rendered no polygons; '
+                'deferring instead of posting an unverified map'
+            )
 
     base = composite_national_outlook_with_reference_boundaries(
         base,
@@ -8636,6 +9281,7 @@ def build_mapbox_spc_outlook_map(
         prefix=
             f'spc_day{day}_',
     )
+
 
 def build_mapbox_spc_fire_map(
     day: int,
@@ -10903,6 +11549,7 @@ def format_datetime_in_abbrev(
 def load_convective_snapshot(
     day: int,
     expected_valid: Optional[datetime] = None,
+    expected_issued: Optional[datetime] = None,
 ) -> SPCConvectiveSnapshot:
     layer_ids = (
         SPC_OUTLOOK_LAYER_IDS.get(
@@ -10944,6 +11591,7 @@ def load_convective_snapshot(
             ),
             return_geometry=True,
             out_sr=3857,
+            fresh=True,
         )
     )
 
@@ -10961,6 +11609,34 @@ def load_convective_snapshot(
             layer_name='categorical',
         )
     )
+
+    # VALID cannot distinguish repeated same-valid cycles (especially Day 2).
+    # This second gate is what prevents the exact failure seen on 2026-08-30:
+    # new 1722Z text paired with the hours-old 0600Z Day-2 polygons.
+    if day <= 3:
+        category_features = (
+            spc_filter_features_for_issuance(
+                category_features,
+                expected_issued,
+                day=day,
+                layer_name='categorical',
+            )
+        )
+
+    if not category_features:
+        raise RetryableSourceDataError(
+            f'SPC Day {day} current categorical '
+            'cycle has no usable features yet'
+        )
+
+    exact_idp_source = ''
+
+    if day <= 3:
+        exact_idp_source = spc_single_feature_source(
+            category_features,
+            day=day,
+            layer_name='categorical',
+        )
 
     category = (
         spc_max_label(
@@ -11025,10 +11701,11 @@ def load_convective_snapshot(
                 out_fields=(
                     'objectid,dn,label,'
                     'label2,issue,valid,'
-                    'idp_filedate,'
+                    'idp_source,idp_filedate,'
                     'idp_ingestdate'
                 ),
                 return_geometry=False,
+                fresh=True,
             )
         )
 
@@ -11041,10 +11718,11 @@ def load_convective_snapshot(
                 out_fields=(
                     'objectid,dn,label,'
                     'label2,issue,valid,'
-                    'idp_filedate,'
+                    'idp_source,idp_filedate,'
                     'idp_ingestdate'
                 ),
                 return_geometry=False,
+                fresh=True,
             )
         )
 
@@ -11057,38 +11735,48 @@ def load_convective_snapshot(
                 out_fields=(
                     'objectid,dn,label,'
                     'label2,issue,valid,'
-                    'idp_filedate,'
+                    'idp_source,idp_filedate,'
                     'idp_ingestdate'
                 ),
                 return_geometry=False,
+                fresh=True,
             )
         )
 
-        tornado_features = (
-            spc_filter_features_for_valid(
-                tornado_features,
+        def current_hazard_features(
+            features: list[dict[str, Any]],
+            name: str,
+        ) -> list[dict[str, Any]]:
+            if not features:
+                return []
+
+            features = spc_filter_features_for_valid(
+                features,
                 expected_valid,
                 day=day,
-                layer_name='tornado',
+                layer_name=name,
             )
+
+            return spc_filter_features_for_issuance(
+                features,
+                expected_issued,
+                day=day,
+                layer_name=name,
+            )
+
+        tornado_features = current_hazard_features(
+            tornado_features,
+            'tornado',
         )
 
-        hail_features = (
-            spc_filter_features_for_valid(
-                hail_features,
-                expected_valid,
-                day=day,
-                layer_name='hail',
-            )
+        hail_features = current_hazard_features(
+            hail_features,
+            'hail',
         )
 
-        wind_features = (
-            spc_filter_features_for_valid(
-                wind_features,
-                expected_valid,
-                day=day,
-                layer_name='wind',
-            )
+        wind_features = current_hazard_features(
+            wind_features,
+            'wind',
         )
 
         tornado_risk = spc_max_label(
@@ -11103,17 +11791,49 @@ def load_convective_snapshot(
             wind_features
         )
 
-        if not any(
-            (
-                tornado_risk,
-                hail_risk,
-                wind_risk,
+        category_dn_values: list[int] = []
+
+        for feature in category_features:
+            try:
+                category_dn_values.append(
+                    int(
+                        (
+                            feature.get(
+                                'attributes'
+                            )
+                            or
+                            {}
+                        ).get(
+                            'dn'
+                        )
+                    )
+                )
+            except Exception:
+                pass
+
+        max_category_dn = max(
+            category_dn_values,
+            default=0,
+        )
+
+        # If SPC is advertising an actual severe-risk category (Marginal or
+        # higher), at least one hazard probability layer must have arrived.
+        # A pure general-thunderstorm outlook legitimately has none.
+        if (
+            max_category_dn >= 3
+            and
+            not any(
+                (
+                    tornado_risk,
+                    hail_risk,
+                    wind_risk,
+                )
             )
         ):
             raise RetryableSourceDataError(
-                f'SPC Day {day} '
-                'probability layers '
-                'were not ready yet'
+                f'SPC Day {day} current categorical '
+                'cycle is ready but probability '
+                'layers are not ready yet'
             )
 
     elif day == 3:
@@ -11126,31 +11846,68 @@ def load_convective_snapshot(
                 out_fields=(
                     'objectid,dn,label,'
                     'label2,issue,valid,'
-                    'idp_filedate,'
+                    'idp_source,idp_filedate,'
                     'idp_ingestdate'
                 ),
                 return_geometry=False,
+                fresh=True,
             )
         )
 
-        severe_features = (
-            spc_filter_features_for_valid(
-                severe_features,
-                expected_valid,
-                day=day,
-                layer_name='severe',
+        if severe_features:
+            severe_features = (
+                spc_filter_features_for_valid(
+                    severe_features,
+                    expected_valid,
+                    day=day,
+                    layer_name='severe',
+                )
             )
-        )
+
+            severe_features = (
+                spc_filter_features_for_issuance(
+                    severe_features,
+                    expected_issued,
+                    day=day,
+                    layer_name='severe',
+                )
+            )
 
         severe_risk = spc_max_label(
             severe_features
         )
 
-        if not severe_risk:
+        category_dn_values: list[int] = []
+
+        for feature in category_features:
+            try:
+                category_dn_values.append(
+                    int(
+                        (
+                            feature.get(
+                                'attributes'
+                            )
+                            or
+                            {}
+                        ).get(
+                            'dn'
+                        )
+                    )
+                )
+            except Exception:
+                pass
+
+        if (
+            max(
+                category_dn_values,
+                default=0,
+            ) >= 3
+            and
+            not severe_risk
+        ):
             raise RetryableSourceDataError(
-                'SPC Day 3 severe '
-                'probability layer '
-                'was not ready yet'
+                'SPC Day 3 severe probability '
+                'layer was not ready yet'
             )
 
     image_layer = (
@@ -11168,6 +11925,8 @@ def load_convective_snapshot(
             day,
             image_layer,
             category_features,
+            exact_idp_source=
+                exact_idp_source,
         )
     )
 
@@ -11303,11 +12062,25 @@ def render_spc(
             )
         )
 
+        expected_issued = (
+            spc_convective_item_issuance(
+                item
+            )
+        )
+
+        if expected_issued is None:
+            raise RetryableSourceDataError(
+                f'SPC Day {day} product has no '
+                'authoritative issuance timestamp'
+            )
+
         snapshot = (
             load_convective_snapshot(
                 day,
                 expected_valid=
                     expected_valid,
+                expected_issued=
+                    expected_issued,
             )
         )
 
@@ -11315,10 +12088,11 @@ def render_spc(
             snapshot.image_path
         )
 
-        issue_z = spc_outlook_cycle_z(
-            item,
-            day,
-            page_text,
+        # Display the actual SPC issuance stamp (e.g. 1722Z), not the
+        # nominal 1730Z GIS cycle used internally to locate the matching
+        # shapefile/source package.
+        issue_z = expected_issued.strftime(
+            '%H%MZ'
         )
 
         risk_region = spc_convective_risk_location(
@@ -11925,29 +12699,29 @@ def render_spc(
 def spc_convective_item_issuance(
     item: RSSItem,
 ) -> Optional[datetime]:
-    source_blob = (
-        f'{item.guid} '
-        f'{item.link}'
-    ).lower()
-
     issued = spc_strict_product_issuance_datetime(
         item.multiline_text,
         item.published,
     )
 
     if issued is None:
-        # RSS publication timestamps are a useful fallback because they are
-        # supplied by the feed itself.  Direct live-page/TGFTP candidates, on
-        # the other hand, must contain an actual NWS/SPC product stamp.
-        if (
-            'spc-live-page-convective'
-            in source_blob
-            or
-            'tgftp-spc-convective'
-            in source_blob
-        ):
+        # Day 1-3 are safety-critical operational outlooks.  Do not promote an
+        # RSS publication timestamp to an SPC issuance timestamp; RSS mirrors
+        # can update independently of the underlying product body.  Raw/live
+        # candidates contain the authoritative WMO/SPC stamp and will be used
+        # as soon as they appear.
+        try:
+            day = spc_day_number(
+                item
+            )
+        except RetryableSourceDataError:
             return None
 
+        if day <= 3:
+            return None
+
+        # Extended outlooks do not always expose the same raw product header
+        # through every feed, so retain the historical RSS fallback there.
         issued = item.published
 
     if issued is None:

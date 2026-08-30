@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BOT_NAME = os.getenv('BOT_NAME', 'PriorityWeather').strip() or 'PriorityWeather'
-BUILD_ID = '2026-08-30-spc-live-newest-border-hm-v8.21'
+BUILD_ID = '2026-08-30-spc-strict-live-cycle-v8.22'
 CONTACT_EMAIL = os.getenv('CONTACT_EMAIL', '').strip()
 MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY', '').strip()
 MAPBOX_STYLE = os.getenv('MAPBOX_STYLE', 'mapbox/light-v11').strip() or 'mapbox/light-v11'
@@ -6557,7 +6557,7 @@ def spc_convective_logical_key(
             f'{valid_start:%Y%m%d}|{cycle}'
         )
 
-    issued = spc_product_issuance_datetime(
+    issued = spc_strict_product_issuance_datetime(
         raw,
         item.published,
     )
@@ -6621,6 +6621,54 @@ def spc_product_issuance_datetime(
             return resolved
 
     return reference
+
+
+def spc_strict_product_issuance_datetime(
+    text: str,
+    reference: Optional[datetime],
+) -> Optional[datetime]:
+    # Raw NWS WMO header.  This is the most authoritative publication stamp.
+    match = re.search(
+        r'(?im)^\s*'
+        r'[A-Z]{4}\d{2}\s+KWNS\s+'
+        r'(\d{6})\b',
+        text,
+    )
+
+    if match:
+        resolved = spc_resolve_ddhhmm(
+            match.group(
+                1
+            ),
+            reference,
+        )
+
+        if resolved is not None:
+            return resolved
+
+    # SPC outlook products also carry an internal ``SPC AC DDHHMM`` stamp.
+    # The live HTML page can expose this before every surrounding header is
+    # present, so accept it as a second authoritative issuance clock.
+    match = re.search(
+        r'(?im)^\s*SPC\s+AC\s+'
+        r'(\d{6})\b',
+        text,
+    )
+
+    if match:
+        resolved = spc_resolve_ddhhmm(
+            match.group(
+                1
+            ),
+            reference,
+        )
+
+        if resolved is not None:
+            return resolved
+
+    # Never substitute the current poll time here.  A partially refreshed SPC
+    # page without a real product stamp is not a new outlook issuance.
+    return None
 
 
 def find_local_issue_clock(
@@ -9157,30 +9205,57 @@ def fetch_spc_convective_live_page_item(
         response.text,
         'html.parser',
     )
-    pre = soup.find(
-        'pre'
-    )
-    raw = (
+
+    pre_blocks = [
         pre.get_text(
             '\n',
             strip=True,
         )
-        if pre
-        else soup.get_text(
+        for pre
+        in soup.find_all(
+            'pre'
+        )
+    ]
+
+    product_blocks = [
+        block
+        for block
+        in pre_blocks
+        if (
+            'CONVECTIVE OUTLOOK'
+            in block.upper()
+            and
+            re.search(
+                r'(?i)\bVALID\s+\d{6}Z',
+                block,
+            )
+        )
+    ]
+
+    if product_blocks:
+        raw = max(
+            product_blocks,
+            key=len,
+        )
+    else:
+        raw = soup.get_text(
             '\n',
             strip=True,
         )
-    )
 
     if 'CONVECTIVE OUTLOOK' not in raw.upper():
         return None
 
-    issued = spc_product_issuance_datetime(
+    issued = spc_strict_product_issuance_datetime(
         raw,
         utcnow(),
     )
 
     if issued is None:
+        log.info(
+            'SPC Day %d live page is mid-refresh without an authoritative issuance stamp; ignoring this snapshot',
+            day,
+        )
         return None
 
     if (
@@ -11850,10 +11925,30 @@ def render_spc(
 def spc_convective_item_issuance(
     item: RSSItem,
 ) -> Optional[datetime]:
-    issued = spc_product_issuance_datetime(
+    source_blob = (
+        f'{item.guid} '
+        f'{item.link}'
+    ).lower()
+
+    issued = spc_strict_product_issuance_datetime(
         item.multiline_text,
         item.published,
     )
+
+    if issued is None:
+        # RSS publication timestamps are a useful fallback because they are
+        # supplied by the feed itself.  Direct live-page/TGFTP candidates, on
+        # the other hand, must contain an actual NWS/SPC product stamp.
+        if (
+            'spc-live-page-convective'
+            in source_blob
+            or
+            'tgftp-spc-convective'
+            in source_blob
+        ):
+            return None
+
+        issued = item.published
 
     if issued is None:
         return None
